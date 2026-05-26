@@ -1,0 +1,51 @@
+[project]
+name = "poly-quoter"
+version = "0.1.0"
+description = "Polymarket CLOB HFT market-maker for 5m/15m crypto Up/Down markets"
+requires-python = ">=3.12"
+dependencies = [
+    "uvloop>=0.21",
+    "websockets>=12.0",
+    "orjson>=3.10",
+    "httpx[http2]>=0.27",
+    "aiosqlite>=0.20",
+    "structlog>=24.1",
+    "sortedcontainers>=2.4",
+    "py-clob-client==0.34.5",
+    "python-dotenv>=1.0",
+    "aiohttp>=3.10",
+    "rich>=13.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["quoter"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "C90", "I", "UP", "ASYNC", "PERF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
