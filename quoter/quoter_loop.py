@@ -24,6 +24,7 @@ from typing import Protocol
 
 from quoter.book.book_manager import BookManager
 from quoter.config import Config
+from quoter.execution.paper_executor import PaperExecutor
 from quoter.markets import Market
 from quoter.ops.logger import get_logger
 from quoter.risk.caps import RiskGuard
@@ -109,9 +110,16 @@ class QuoterLoop:
                 pending = list(self._dirty)
                 self._dirty.clear()
                 for mid in pending:
-                    await self._requote_market(mid)
+                    try:
+                        await self._requote_market(mid)
+                    except Exception as e:
+                        # Don't let one bad market take down the whole loop
+                        log.exception("requote_market_failed", market=mid[:12], error=str(e))
         except asyncio.CancelledError:
             log.info("quoter_loop_cancelled")
+            raise
+        except Exception as e:
+            log.exception("quoter_loop_died", error=str(e))
             raise
 
     async def _requote_market(self, market_id: str) -> None:
@@ -142,6 +150,10 @@ class QuoterLoop:
             if mid_yes is None:
                 return
 
+            # Paper-mode: simulate fills against latest book BEFORE recompute
+            if isinstance(self.exec, PaperExecutor):
+                self._apply_paper_fills(market_id, yes_top, no_top)
+
             committed = self._infer_committed(market, mid_yes)
             pos = self.inv.positions.get(market_id)
             yes_qty = pos.yes_qty if pos else 0
@@ -156,6 +168,18 @@ class QuoterLoop:
                 inventory_no_qty=no_qty,
             )
             self.exec.sync(market_id, desired)
+
+            # Paper-mode: cache ask snapshot for next placement reference
+            if isinstance(self.exec, PaperExecutor):
+                self.exec.update_book_snapshot(market_id, yes_top, no_top)
+
+    def _apply_paper_fills(self, market_id: str, yes_top, no_top) -> None:
+        """Drain simulated fills from PaperExecutor into inventory."""
+        executor = self.exec
+        assert isinstance(executor, PaperExecutor)
+        fills = executor.check_fills(market_id, yes_top, no_top)
+        for f in fills:
+            self.inv.on_fill(f.market_id, f.side, f.price, f.size)
 
     async def _on_market_expired(self, market_id: str) -> None:
         """Cancel all our quotes when a market window closes."""
