@@ -33,6 +33,7 @@ from quoter.feeds.binance_ws import BinanceWS  # noqa: E402
 from quoter.feeds.poly_market_ws import PolyMarketWS  # noqa: E402
 from quoter.markets import Market, discover_markets  # noqa: E402
 from quoter.ops.logger import get_logger, setup_logging  # noqa: E402
+from quoter.ops.metrics import make_app, serve_forever  # noqa: E402
 from quoter.persistence.state import State  # noqa: E402
 from quoter.quoter_loop import QuoterLoop  # noqa: E402
 from quoter.risk.caps import RiskGuard  # noqa: E402
@@ -139,10 +140,17 @@ async def _amain() -> None:
     executor = _build_executor(cfg.mode)
     risk = RiskGuard(cfg, inventory)
     binance_latest: dict[str, float] = {}
+
+    # Fill persistence hook (only in paper / live)
+    async def on_fill(market_id: str, side: str, price: float, qty: int) -> None:
+        if state is not None:
+            await state.record_fill(market_id, side, price, qty, source=cfg.mode)
+
     quoter = QuoterLoop(
         cfg=cfg, markets=markets, book_manager=book_manager,
         executor=executor, inventory=inventory, risk=risk,
         get_binance_price=binance_latest.get,
+        on_fill=on_fill,
     )
     for token in by_token:
         book_manager.subscribe(token, _make_book_listener(quoter))
@@ -158,6 +166,12 @@ async def _amain() -> None:
     poly = PolyMarketWS(cfg.ws_market_url, on_poly_event)
     poly.set_subscriptions(list(by_token.keys()))
 
+    # HTTP dashboard
+    dashboard_app = make_app(
+        cfg=cfg, inventory=inventory, executor=executor, quoter=quoter,
+        risk=risk, markets=markets, book_manager=book_manager, state=state,
+    )
+
     tasks = [
         asyncio.create_task(binance.run(), name="binance_ws"),
         asyncio.create_task(poly.run(), name="poly_market_ws"),
@@ -165,6 +179,10 @@ async def _amain() -> None:
         asyncio.create_task(
             _periodic_snapshot(log, inventory, executor, quoter, state),
             name="snapshot_loop",
+        ),
+        asyncio.create_task(
+            serve_forever(dashboard_app, host="127.0.0.1", port=8080),
+            name="dashboard_http",
         ),
     ]
     log.info("running_tasks_started", tasks=[t.get_name() for t in tasks])

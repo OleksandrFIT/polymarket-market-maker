@@ -37,9 +37,9 @@ class Config:
     requote_on_mid_move_cents: int = 1  # threshold to mark market dirty
 
     # ── Risk ──
-    max_daily_loss_usd: float = 20.0
-    max_inventory_skew_shares: int = 200
-    max_market_position_usd: float = 50.0
+    max_daily_loss_usd: float = 50.0
+    max_inventory_skew_shares: int = 500
+    max_market_position_usd: float = 200.0
     stop_after_consecutive_loss_days: int = 2
 
     # ── WS health ──

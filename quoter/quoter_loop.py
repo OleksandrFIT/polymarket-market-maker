@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from quoter.book.book_manager import BookManager
@@ -57,6 +57,7 @@ class QuoterLoop:
         inventory: Inventory,
         risk: RiskGuard,
         get_binance_price: Callable[[str], float | None],
+        on_fill: Callable[[str, str, float, int], Awaitable[None]] | None = None,
     ) -> None:
         self.cfg = cfg
         self.markets = {m.market_id: m for m in markets}
@@ -65,6 +66,7 @@ class QuoterLoop:
         self.inv = inventory
         self.risk = risk
         self.get_binance = get_binance_price
+        self._on_fill = on_fill
 
         # Reverse map token_id → market_id
         self._token_to_market: dict[str, str] = {}
@@ -152,7 +154,7 @@ class QuoterLoop:
 
             # Paper-mode: simulate fills against latest book BEFORE recompute
             if isinstance(self.exec, PaperExecutor):
-                self._apply_paper_fills(market_id, yes_top, no_top)
+                await self._apply_paper_fills(market_id, yes_top, no_top)
 
             committed = self._infer_committed(market, mid_yes)
             pos = self.inv.positions.get(market_id)
@@ -173,13 +175,18 @@ class QuoterLoop:
             if isinstance(self.exec, PaperExecutor):
                 self.exec.update_book_snapshot(market_id, yes_top, no_top)
 
-    def _apply_paper_fills(self, market_id: str, yes_top, no_top) -> None:
-        """Drain simulated fills from PaperExecutor into inventory."""
+    async def _apply_paper_fills(self, market_id: str, yes_top, no_top) -> None:
+        """Drain simulated fills from PaperExecutor into inventory + persist."""
         executor = self.exec
         assert isinstance(executor, PaperExecutor)
         fills = executor.check_fills(market_id, yes_top, no_top)
         for f in fills:
             self.inv.on_fill(f.market_id, f.side, f.price, f.size)
+            if self._on_fill is not None:
+                try:
+                    await self._on_fill(f.market_id, f.side, f.price, f.size)
+                except Exception as e:
+                    log.warning("on_fill_callback_error", error=str(e))
 
     async def _on_market_expired(self, market_id: str) -> None:
         """Cancel all our quotes when a market window closes."""
