@@ -55,6 +55,8 @@ def compute_ladder(  # noqa: C901  (orchestration of many strategy layers)
     timeframe: str = "5m",
     asset: str | None = None,
     window_length_sec: float | None = None,
+    velocity_short: float | None = None,
+    velocity_long: float | None = None,
 ) -> list[Quote]:
     """Return desired bids.
 
@@ -62,6 +64,13 @@ def compute_ladder(  # noqa: C901  (orchestration of many strategy layers)
         timeframe: "5m" or "15m" — picks which timing curve.
         asset: "BTC" / "ETH" / etc — for conviction triggers.
         window_length_sec: if None, derived from timeframe (300 / 900).
+        velocity_short: Binance price velocity over short lookback (e.g. 30s)
+            as fraction (0.001 = +0.1%). Used to GATE directional skew —
+            we only skew when velocity AGREES with mid direction. None
+            disables gating (fall back to mid-only skew).
+        velocity_long: Velocity over long lookback (e.g. 60s) for
+            conviction trigger confirmation. None disables velocity
+            confirmation (fall back to mid-only trigger).
     """
     if not (0.02 <= mid_yes <= 0.98) or time_to_expiry < 5.0:
         return []
@@ -75,9 +84,9 @@ def compute_ladder(  # noqa: C901  (orchestration of many strategy layers)
     # ── Phase-11: TIMING multiplier from front-loaded curve ──
     timing_mult = _timing_multiplier(cfg, timeframe, window_frac)
 
-    # ── Phase-11: budget after conviction check ──
+    # ── Phase-12: conviction check with velocity confirmation ──
     is_conviction = _is_conviction_play(
-        cfg, mid_yes, time_into_window, timeframe, asset,
+        cfg, mid_yes, time_into_window, timeframe, asset, velocity_long,
     )
     budget = cfg.budget_per_market_usd * (
         cfg.conviction_budget_multiplier if is_conviction else 1.0
@@ -95,8 +104,8 @@ def compute_ladder(  # noqa: C901  (orchestration of many strategy layers)
         elif mid_yes <= cfg.directional_low_threshold:
             skip_yes = True
 
-    # Directional size multipliers
-    yes_mult, no_mult = _directional_multipliers(cfg, mid_yes)
+    # ── Phase-12: Directional size multipliers GATED by velocity ──
+    yes_mult, no_mult = _directional_multipliers(cfg, mid_yes, velocity_short)
     # Apply timing globally
     yes_mult *= timing_mult
     no_mult *= timing_mult
@@ -126,41 +135,77 @@ def _is_conviction_play(
     time_into_window: float,
     timeframe: str,
     asset: str | None,
+    velocity_long: float | None,
 ) -> bool:
-    """Phase-11 conviction triggers. ANY-of:
-       1. timeframe=15m AND first 30s of window (Bonereaper's "early big" pattern)
-       2. asset in conviction_assets AND mid extreme (|mid-0.5| > threshold)
+    """Phase-12 conviction triggers — require velocity confirmation.
+
+    ANY-of:
+       1. timeframe=15m AND first 30s of window (Bonereaper early-15m pattern)
+          — uses timing alone, no velocity needed
+       2. asset in conviction_assets AND mid extreme AND velocity AGREES
+          (Phase 12: previously was just mid-extreme, now requires Binance
+          velocity to confirm direction)
     """
-    # Trigger 1: early 15m
+    # Trigger 1: early 15m (no velocity required)
     if (
         timeframe == "15m"
         and time_into_window <= cfg.conviction_window_open_max_sec
     ):
         return True
-    # Trigger 2: BTC + extreme mid
+    # Trigger 2: BTC + extreme mid + velocity confirms direction
     if asset and asset.upper() in (a.upper() for a in cfg.conviction_assets):
         if abs(mid_yes - 0.5) > cfg.conviction_extreme_mid_threshold:
-            return True
+            # If no velocity data → fall back to mid-only (backward compat)
+            if velocity_long is None:
+                return True
+            # Otherwise: velocity must agree with mid AND exceed min magnitude
+            mid_direction = 1 if mid_yes > 0.5 else -1
+            velo_direction = 1 if velocity_long > 0 else -1
+            if (
+                mid_direction == velo_direction
+                and abs(velocity_long) >= cfg.conviction_min_velocity
+            ):
+                return True
     return False
 
 
 def _directional_multipliers(
-    cfg: Config, mid_yes: float
+    cfg: Config, mid_yes: float, velocity_short: float | None,
 ) -> tuple[float, float]:
-    """Winning side bigger, losing side smaller (Phase-9 skew).
+    """Winning side bigger, losing side smaller — GATED by velocity.
 
-    Late-window stack from Phase 9 is NEUTRALIZED in Phase 11
-    (late_window_size_multiplier=1.0 by default).
+    Phase-12 logic:
+      * Compute mid-based skew like before.
+      * If velocity_short is None → keep skew (backward compat).
+      * If velocity AGREES with mid (or is neutral) → keep skew.
+      * If velocity OPPOSES mid → KILL the skew (return 1.0, 1.0).
+        Rationale: mid says YES but BTC moving down → high flip risk →
+        don't pile in on the side that book consensus says wins.
     """
     yes_mult = no_mult = 1.0
-    if cfg.directional_size_skew_enabled:
-        skew = abs(mid_yes - 0.5) * cfg.directional_skew_coef
-        if mid_yes > 0.5:
-            yes_mult = 1.0 + skew
-            no_mult = 1.0 / max(yes_mult, 0.1)
-        elif mid_yes < 0.5:
-            no_mult = 1.0 + skew
-            yes_mult = 1.0 / max(no_mult, 0.1)
+    if not cfg.directional_size_skew_enabled:
+        return yes_mult, no_mult
+
+    skew = abs(mid_yes - 0.5) * cfg.directional_skew_coef
+    mid_direction = 1 if mid_yes > 0.5 else (-1 if mid_yes < 0.5 else 0)
+    if mid_direction == 0:
+        return 1.0, 1.0
+
+    # Check velocity gate (Phase 12 addition)
+    if velocity_short is not None:
+        velo_neutral = abs(velocity_short) < cfg.velocity_neutral_threshold
+        velo_direction = 1 if velocity_short > 0 else -1
+        if not velo_neutral and velo_direction != mid_direction:
+            # Velocity OPPOSES mid → high flip risk → kill skew
+            return 1.0, 1.0
+
+    # Mid (and velocity if non-neutral) agree → apply skew
+    if mid_direction > 0:
+        yes_mult = 1.0 + skew
+        no_mult = 1.0 / max(yes_mult, 0.1)
+    else:
+        no_mult = 1.0 + skew
+        yes_mult = 1.0 / max(no_mult, 0.1)
     return yes_mult, no_mult
 
 

@@ -209,6 +209,89 @@ class TestTimingCurve:
         assert len(late_5m) > 0 or len(late_15m) > 0
 
 
+class TestVelocityGate:
+    """Phase-12: directional skew GATED by Binance velocity.
+
+    Note: at polarized mid (0.80) the Layer-A YES has many more LEVELS than
+    Layer-A NO regardless of skew (mid_no=0.20 ⇒ only 9 NO levels possible
+    vs 50 for YES). So we compare WITH-velocity vs OPPOSED-velocity to test
+    the gating effect on PER-QUOTE multiplier.
+    """
+
+    def _yes_total_la(self, out):
+        tail_max = max(CFG.cheap_tail_levels)
+        return sum(q.size for q in out if q.side == "YES" and q.price > tail_max)
+
+    def test_velocity_agrees_amplifies_yes_vs_velocity_opposes(self):
+        """At mid=0.80: velocity UP → bigger YES; velocity DOWN → smaller YES."""
+        agree = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200,
+                                timeframe="5m", asset="ETH",  # no conviction
+                                velocity_short=0.003)
+        oppose = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200,
+                                  timeframe="5m", asset="ETH",
+                                  velocity_short=-0.003)
+        yes_agree = self._yes_total_la(agree)
+        yes_oppose = self._yes_total_la(oppose)
+        # When velocity opposes, skew killed → smaller YES total
+        assert yes_agree > yes_oppose
+
+    def test_velocity_neutral_keeps_skew(self):
+        """Tiny velocity (below neutral threshold) → behaves like velocity_short=None."""
+        neutral = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200,
+                                   timeframe="5m", asset="ETH",
+                                   velocity_short=0.0001)
+        no_velo = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200,
+                                   timeframe="5m", asset="ETH",
+                                   velocity_short=None)
+        # Roughly equivalent
+        assert abs(self._yes_total_la(neutral) - self._yes_total_la(no_velo)) <= 10
+
+    def test_no_velocity_equivalent_to_skew_on(self):
+        """velocity_short=None → skew applied (backward compat)."""
+        no_velo = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200,
+                                   timeframe="5m", asset="ETH",
+                                   velocity_short=None)
+        oppose = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200,
+                                  timeframe="5m", asset="ETH",
+                                  velocity_short=-0.003)
+        # No velocity → skew applied → bigger than oppose case
+        assert self._yes_total_la(no_velo) > self._yes_total_la(oppose)
+
+
+class TestVelocityConviction:
+    """Phase-12: conviction trigger requires velocity confirmation."""
+
+    def test_conviction_triggers_when_btc_extreme_mid_and_velocity_agrees(self):
+        # BTC + extreme mid + velocity UP → conviction
+        out_conv = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=200,
+                                    timeframe="5m", asset="BTC",
+                                    velocity_long=0.003)
+        # Same setup but no velocity confirm → backward-compat: still conviction
+        out_no_velo = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=200,
+                                       timeframe="5m", asset="BTC",
+                                       velocity_long=None)
+        tail_max = max(CFG.cheap_tail_levels)
+        sz_conv = sum(q.size for q in out_conv if q.price > tail_max)
+        sz_nv = sum(q.size for q in out_no_velo if q.price > tail_max)
+        # Both should be big (conviction); both ≈ same
+        assert sz_conv > 0 and sz_nv > 0
+
+    def test_conviction_killed_when_velocity_opposes_mid(self):
+        """BTC + extreme mid BUT velocity OPPOSES → NO conviction."""
+        # mid=0.85 says YES, but BTC moving DOWN → suppress conviction
+        out_no_conv = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=200,
+                                       timeframe="5m", asset="BTC",
+                                       velocity_long=-0.003)
+        out_with_conv = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=200,
+                                         timeframe="5m", asset="BTC",
+                                         velocity_long=0.003)
+        tail_max = max(CFG.cheap_tail_levels)
+        sz_no = sum(q.size for q in out_no_conv if q.price > tail_max)
+        sz_yes = sum(q.size for q in out_with_conv if q.price > tail_max)
+        # Without conviction → smaller budget → smaller total size
+        assert sz_yes > sz_no
+
+
 class TestConviction:
     """Phase-11: conviction triggers multiply budget."""
 

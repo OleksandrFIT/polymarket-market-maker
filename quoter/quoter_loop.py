@@ -58,6 +58,7 @@ class QuoterLoop:
         risk: RiskGuard,
         get_binance_price: Callable[[str], float | None],
         on_fill: Callable[[str, str, float, int], Awaitable[None]] | None = None,
+        get_binance_velocity: Callable[[str, float], float | None] | None = None,
     ) -> None:
         self.cfg = cfg
         self.markets = {m.market_id: m for m in markets}
@@ -66,6 +67,7 @@ class QuoterLoop:
         self.inv = inventory
         self.risk = risk
         self.get_binance = get_binance_price
+        self.get_binance_velocity = get_binance_velocity
         self._on_fill = on_fill
 
         # Reverse map token_id → market_id
@@ -196,6 +198,16 @@ class QuoterLoop:
             yes_qty = pos.yes_qty if pos else 0
             no_qty = pos.no_qty if pos else 0
 
+            # Phase-12: get Binance velocity (short for skew gate, long for conviction)
+            velo_short = velo_long = None
+            if self.get_binance_velocity is not None:
+                velo_short = self.get_binance_velocity(
+                    market.asset, self.cfg.velocity_short_lookback_sec,
+                )
+                velo_long = self.get_binance_velocity(
+                    market.asset, self.cfg.velocity_long_lookback_sec,
+                )
+
             desired = compute_ladder(
                 self.cfg,
                 mid_yes=mid_yes,
@@ -205,6 +217,8 @@ class QuoterLoop:
                 inventory_no_qty=no_qty,
                 timeframe=market.timeframe,
                 asset=market.asset,
+                velocity_short=velo_short,
+                velocity_long=velo_long,
             )
             self.exec.sync(market_id, desired)
 

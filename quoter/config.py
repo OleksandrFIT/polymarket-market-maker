@@ -98,10 +98,26 @@ class Config:
     # Triggers (any of):
     #   - timeframe is "15m" AND time_into_window <= 30s (early on 15m)
     #   - asset in conviction_assets (BTC) AND mid extreme (>0.85 or <0.15)
+    #     AND binance velocity CONFIRMS mid direction
     conviction_budget_multiplier: float = 6.0  # 6× → ~$150 conviction budget
     conviction_window_open_max_sec: int = 30
     conviction_assets: tuple[str, ...] = ("BTC",)
     conviction_extreme_mid_threshold: float = 0.15  # |mid-0.5| > this
+
+    # ── Phase-12 Binance velocity signal (predictive directional) ──
+    # The mid_yes alone is a *coincident* indicator. Binance BTC velocity
+    # over a short lookback is a *leading* indicator: if BTC is moving UP
+    # in last 30s, YES becomes more likely to be the final winner.
+    # We use velocity in two places:
+    #   1. directional_skew: skew sizing ONLY if velocity AGREES with mid
+    #   2. conviction trigger: require min velocity magnitude on extreme mid
+    velocity_short_lookback_sec: float = 30.0   # for directional skew gating
+    velocity_long_lookback_sec: float = 60.0    # for conviction confirmation
+    # Velocity less than this (abs value) treated as "neutral" — won't gate skew
+    velocity_neutral_threshold: float = 0.0005  # 0.05% per lookback
+    # Conviction velocity must be at least this much in mid's direction
+    conviction_min_velocity: float = 0.001      # 0.1% per 60s
+    velocity_buffer_max_age_sec: float = 300.0
 
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle
