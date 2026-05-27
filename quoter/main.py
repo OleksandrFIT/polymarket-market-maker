@@ -27,10 +27,14 @@ uvloop.install()
 
 from quoter.book.book_manager import BookManager  # noqa: E402
 from quoter.config import Config  # noqa: E402
+from quoter.creds import PolyCreds  # noqa: E402
+from quoter.execution.clob_client import ClobOps  # noqa: E402
+from quoter.execution.live_executor import LiveExecutor  # noqa: E402
 from quoter.execution.paper_executor import PaperExecutor  # noqa: E402
 from quoter.execution.shadow_executor import ShadowExecutor  # noqa: E402
 from quoter.feeds.binance_ws import BinanceWS  # noqa: E402
 from quoter.feeds.poly_market_ws import PolyMarketWS  # noqa: E402
+from quoter.feeds.poly_user_ws import PolyUserWS  # noqa: E402
 from quoter.lifecycle.market_lifecycle import MarketLifecycle  # noqa: E402
 from quoter.markets import Market, discover_markets  # noqa: E402
 from quoter.ops.logger import get_logger, setup_logging  # noqa: E402
@@ -41,12 +45,17 @@ from quoter.risk.caps import RiskGuard  # noqa: E402
 from quoter.strategy.inventory import Inventory  # noqa: E402
 
 
-def _build_executor(mode: str) -> Any:
-    if mode == "shadow":
+def _build_executor(cfg: Config) -> Any:
+    """Pick executor for current mode. Live needs creds + ClobOps."""
+    if cfg.mode == "shadow":
         return ShadowExecutor()
-    if mode == "paper":
+    if cfg.mode == "paper":
         return PaperExecutor()
-    raise NotImplementedError(f"Live mode wired in Phase 5; got {mode!r}")
+    if cfg.mode == "live":
+        creds = PolyCreds.from_env()
+        clob = ClobOps(creds, host=cfg.clob_host)
+        return LiveExecutor(clob=clob)
+    raise ValueError(f"Unknown mode: {cfg.mode!r}")
 
 
 async def _periodic_snapshot(
@@ -118,8 +127,10 @@ async def _amain() -> None:  # noqa: C901  (entry-point orchestration, hard to s
     log.info("startup", mode=cfg.mode, bankroll=cfg.bankroll_usd)
 
     if cfg.mode == "live":
-        log.error("live_mode_not_yet_wired_phase_5")
-        return
+        log.warning(
+            "LIVE_MODE_ACTIVE",
+            warning="Real money on the line. Ensure risk caps are set!",
+        )
 
     markets = await discover_markets(cfg)
     if not markets:
@@ -134,20 +145,40 @@ async def _amain() -> None:  # noqa: C901  (entry-point orchestration, hard to s
     state, session_ts = await _init_state(cfg, markets)
     book_manager = BookManager()
     inventory = Inventory()
-    executor = _build_executor(cfg.mode)
+    executor = _build_executor(cfg)
     risk = RiskGuard(cfg, inventory)
     binance_latest: dict[str, float] = {}
 
-    # Fill persistence hook (only in paper / live)
-    async def on_fill(market_id: str, side: str, price: float, qty: int) -> None:
+    # ── LIVE setup: register tokens with executor + startup cleanup ──
+    if isinstance(executor, LiveExecutor):
+        for m in markets:
+            executor.register_token(m.yes_token, m.market_id, "YES")
+            executor.register_token(m.no_token, m.market_id, "NO")
+        # Startup recovery: wipe orphan orders from previous session
+        n_cancelled = await executor.cancel_all_open()
+        if n_cancelled > 0:
+            log.warning("startup_cancel_all", n=n_cancelled)
+
+    # Fill PERSISTENCE callback — used by QuoterLoop in paper (inventory
+    # is updated separately by the paper-sim path).
+    async def persist_fill(market_id: str, side: str, price: float, qty: int) -> None:
         if state is not None:
             await state.record_fill(market_id, side, price, qty, source=cfg.mode)
+
+    # Fill callback for LIVE — LiveExecutor's user WS triggers this with
+    # REAL fills. We update inventory here (paper does it in QuoterLoop).
+    async def live_fill_handler(market_id: str, side: str, price: float, qty: int) -> None:
+        inventory.on_fill(market_id, side, price, qty)
+        await persist_fill(market_id, side, price, qty)
+
+    if isinstance(executor, LiveExecutor):
+        executor.set_fill_callback(live_fill_handler)
 
     quoter = QuoterLoop(
         cfg=cfg, markets=markets, book_manager=book_manager,
         executor=executor, inventory=inventory, risk=risk,
         get_binance_price=binance_latest.get,
-        on_fill=on_fill,
+        on_fill=persist_fill,
     )
     # Subscribe listener for any token added later via MarketLifecycle.
     # We subscribe per-token on first event arrival lazily — the listener
@@ -161,6 +192,10 @@ async def _amain() -> None:  # noqa: C901  (entry-point orchestration, hard to s
         """Hook from MarketLifecycle when a new market joins tracking."""
         book_manager.subscribe(m.yes_token, book_listener)
         book_manager.subscribe(m.no_token, book_listener)
+        # Live: also register the new tokens so user-WS fills can route
+        if isinstance(executor, LiveExecutor):
+            executor.register_token(m.yes_token, m.market_id, "YES")
+            executor.register_token(m.no_token, m.market_id, "NO")
 
     async def on_btc_price(asset: str, price: float, _ts: float) -> None:
         binance_latest[asset] = price
@@ -200,6 +235,17 @@ async def _amain() -> None:  # noqa: C901  (entry-point orchestration, hard to s
             name="dashboard_http",
         ),
     ]
+
+    # LIVE-only: user WebSocket for fill events → instant repost
+    if isinstance(executor, LiveExecutor):
+        creds = PolyCreds.from_env()
+        user_ws = PolyUserWS(
+            cfg.ws_user_url, creds, on_event=executor.on_user_event,
+        )
+        tasks.append(
+            asyncio.create_task(user_ws.run(), name="poly_user_ws"),
+        )
+        log.info("user_ws_attached_for_live_fill_events")
     log.info("running_tasks_started", tasks=[t.get_name() for t in tasks])
     await _await_shutdown(tasks)
 
