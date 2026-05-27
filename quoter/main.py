@@ -50,7 +50,14 @@ def _build_executor(cfg: Config) -> Any:
     if cfg.mode == "shadow":
         return ShadowExecutor()
     if cfg.mode == "paper":
-        return PaperExecutor()
+        return PaperExecutor(
+            realistic_mode=cfg.paper_fill_realistic_mode,
+            queue_position=cfg.paper_queue_position,
+            taker_size_min=cfg.paper_taker_size_min,
+            taker_size_max=cfg.paper_taker_size_max,
+            latency_ms=cfg.paper_latency_ms,
+            fill_prob_multiplier=cfg.paper_fill_prob_multiplier,
+        )
     if cfg.mode == "live":
         creds = PolyCreds.from_env()
         clob = ClobOps(creds, host=cfg.clob_host)

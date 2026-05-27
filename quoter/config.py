@@ -57,16 +57,69 @@ class Config:
     directional_size_skew_enabled: bool = True
     directional_skew_coef: float = 2.0
 
-    # ── Late-window aggressive stack (Phase-9) ──
-    # In last N seconds of a window, post HEAVY bids on dominant side at
-    # tight prices (mid-1c, mid-2c). This is Bonereaper's "last-30s loading".
+    # ── Late-window aggressive stack (Phase-9 — DEPRECATED in Phase 11) ──
+    # Phase 9 thought Bonereaper does ×3 in last 30s. Data showed OPPOSITE:
+    # he backs off in the final minute and front-loads at window open.
+    # These knobs are kept for backward compat but neutralized (×1.0).
     late_window_sec: int = 30
-    late_window_size_multiplier: float = 3.0   # 3× normal size on dominant side
-    late_window_dominant_threshold: float = 0.65  # only stack when mid past this
+    late_window_size_multiplier: float = 1.0   # neutralized
+    late_window_dominant_threshold: float = 0.65
+
+    # ── Phase-11 timing curve (Bonereaper-confirmed front-loaded pattern) ──
+    # Source: live analysis of 3000 of his trades — 67% of capital deployed
+    # in first 4.5 min of 15m window, drops to 1-3% mid-window, modest
+    # re-engagement at 10:30-13:30, near-zero in final 90s.
+    # Format: tuple of (fraction_start, fraction_end, size_multiplier).
+    # ladder uses the bucket matching `(time_into_window/window_length)`.
+    timing_curve_5m: tuple[tuple[float, float, float], ...] = (
+        (0.00, 0.10, 3.0),   # 0-30s of 5m: ATTACK (window just opened)
+        (0.10, 0.30, 2.0),   # 30-90s:      EARLY
+        (0.30, 0.60, 1.0),   # 90-180s:     BASE
+        (0.60, 0.80, 0.5),   # 180-240s:    TAPER
+        (0.80, 1.00, 0.1),   # 240-300s:    MINIMAL (Bonereaper backs off)
+    )
+    timing_curve_15m: tuple[tuple[float, float, float], ...] = (
+        (0.00, 0.10, 3.0),   # 0-90s:       PEAK (27.9% of capital observed)
+        (0.10, 0.30, 2.0),   # 90-270s:     EARLY
+        (0.30, 0.45, 0.8),   # 270-405s:    DRY SPELL
+        (0.45, 0.60, 0.3),   # 405-540s:    VALLEY
+        (0.60, 0.85, 1.5),   # 540-765s:    RE-ENGAGEMENT
+        (0.85, 1.00, 0.3),   # 765-900s:    TAPER
+    )
+
+    # ── Phase-11 polarized cheap-tail dominance ──
+    # When market is heavily skewed (mid > 0.75 or < 0.25), Bonereaper puts
+    # 64% of capital on the CHEAP side (lottery tickets). Match that.
+    polarized_threshold: float = 0.75
+    polarized_cheap_side_pct: float = 0.60  # 60% of budget to cheap side
+
+    # ── Phase-11 conviction-based variable sizing ──
+    # Default: small probe ($25). Conviction trigger → larger commitment.
+    # Triggers (any of):
+    #   - timeframe is "15m" AND time_into_window <= 30s (early on 15m)
+    #   - asset in conviction_assets (BTC) AND mid extreme (>0.85 or <0.15)
+    conviction_budget_multiplier: float = 6.0  # 6× → ~$150 conviction budget
+    conviction_window_open_max_sec: int = 30
+    conviction_assets: tuple[str, ...] = ("BTC",)
+    conviction_extreme_mid_threshold: float = 0.15  # |mid-0.5| > this
 
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle
     requote_on_mid_move_cents: int = 1
+
+    # ── Paper-fill realism (Phase-9+) ──
+    # The live CLOB has 5-15 maker bids at each price level, plus tier-1
+    # makers (Bonereaper) holding queue positions 1-3 with sub-10ms latency
+    # from us-east-1. Our laptop sits ~110ms away in Slovakia and starts
+    # at the back of the queue. The naive paper model (100% fill on cross)
+    # massively over-estimates our edge. Toggle realistic_mode ON to model
+    # queue priority + probabilistic taker arrivals + latency penalty.
+    paper_fill_realistic_mode: bool = True
+    paper_queue_position: int = 8         # default seat (middle of queue)
+    paper_taker_size_min: int = 5         # smallest simulated taker SELL
+    paper_taker_size_max: int = 200       # largest simulated taker SELL
+    paper_latency_ms: int = 110           # round-trip Slovakia → us-east-1
+    paper_fill_prob_multiplier: float = 1.0  # global knob (1.0 = baseline)
 
     # ── Risk ──
     max_daily_loss_usd: float = 50.0

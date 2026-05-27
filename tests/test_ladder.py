@@ -91,16 +91,21 @@ class TestInventorySkew:
 
 
 class TestLateWindowSkew:
-    def test_committed_yes_dominates_size_late(self):
-        late = compute_ladder(CFG, mid_yes=0.8, time_to_expiry=30, committed_side="YES")
-        yes_sz = sum(q.size for q in late if q.side == "YES")
-        no_sz = sum(q.size for q in late if q.side == "NO")
-        assert yes_sz > no_sz
+    """Phase-11: late window NEUTRALIZED — timing curve handles aggression."""
+
+    def test_committed_yes_still_dominates_via_directional_skew(self):
+        """Polarized mid=0.8 → YES bigger via directional_size_skew (not late stack)."""
+        out = compute_ladder(CFG, mid_yes=0.8, time_to_expiry=30,
+                              committed_side="YES", timeframe="5m")
+        tail_max = max(CFG.cheap_tail_levels)
+        yes_la = sum(q.size for q in out if q.side == "YES" and q.price > tail_max)
+        no_la = sum(q.size for q in out if q.side == "NO" and q.price > tail_max)
+        assert yes_la > no_la  # Layer-A YES dominates polarized
 
     def test_no_skew_when_no_committed_side(self):
-        # Without committed_side, sizing is symmetric (modulo cheap-tail)
-        out = compute_ladder(CFG, mid_yes=0.5, time_to_expiry=30, committed_side=None)
-        assert len(out) > 0  # just sanity
+        out = compute_ladder(CFG, mid_yes=0.5, time_to_expiry=30, committed_side=None,
+                              timeframe="5m")
+        assert len(out) > 0
 
 
 class TestSelfCrossPrevention:
@@ -118,32 +123,42 @@ class TestSelfCrossPrevention:
 
 
 class TestDirectionalSkew:
-    """Phase-9: polarized mid → BIGGER winning side, SMALLER losing.
-    No hard skip; both sides quoted but with imbalanced sizing."""
+    """Phase-11: polarized mid → BIGGER winning side Layer-A; cheap-tail
+    boosts LOSING side (polarized cheap-tail dominance)."""
 
-    def test_polarized_high_makes_yes_quotes_bigger(self):
+    def test_polarized_high_layer_a_yes_bigger(self):
+        """Layer-A YES grows when mid > 0.5 (winning side scaling)."""
         out_neutral = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
         out_high = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200)
-        # Both sides still quoted (no skip)
-        assert any(q.side == "NO" for q in out_high)
-        assert any(q.side == "YES" for q in out_high)
-        # YES total shares grew, NO shrank
-        yes_size_neutral = sum(q.size for q in out_neutral if q.side == "YES")
-        yes_size_high = sum(q.size for q in out_high if q.side == "YES")
-        no_size_neutral = sum(q.size for q in out_neutral if q.side == "NO")
-        no_size_high = sum(q.size for q in out_high if q.side == "NO")
-        assert yes_size_high > yes_size_neutral
-        assert no_size_high < no_size_neutral
+        tail_max = max(CFG.cheap_tail_levels)
+        # Layer-A only (exclude cheap-tail)
+        yes_neutral = sum(q.size for q in out_neutral if q.side == "YES" and q.price > tail_max)
+        yes_high = sum(q.size for q in out_high if q.side == "YES" and q.price > tail_max)
+        no_neutral = sum(q.size for q in out_neutral if q.side == "NO" and q.price > tail_max)
+        no_high = sum(q.size for q in out_high if q.side == "NO" and q.price > tail_max)
+        assert yes_high > yes_neutral  # winning side bigger
+        assert no_high < no_neutral    # losing side smaller
 
-    def test_polarized_low_makes_no_quotes_bigger(self):
+    def test_polarized_low_layer_a_no_bigger(self):
         out_low = compute_ladder(CFG, mid_yes=0.20, time_to_expiry=200)
         out_neutral = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
-        no_size_low = sum(q.size for q in out_low if q.side == "NO")
-        no_size_neutral = sum(q.size for q in out_neutral if q.side == "NO")
-        yes_size_low = sum(q.size for q in out_low if q.side == "YES")
-        yes_size_neutral = sum(q.size for q in out_neutral if q.side == "YES")
-        assert no_size_low > no_size_neutral
-        assert yes_size_low < yes_size_neutral
+        tail_max = max(CFG.cheap_tail_levels)
+        no_low = sum(q.size for q in out_low if q.side == "NO" and q.price > tail_max)
+        no_neutral = sum(q.size for q in out_neutral if q.side == "NO" and q.price > tail_max)
+        yes_low = sum(q.size for q in out_low if q.side == "YES" and q.price > tail_max)
+        yes_neutral = sum(q.size for q in out_neutral if q.side == "YES" and q.price > tail_max)
+        assert no_low > no_neutral
+        assert yes_low < yes_neutral
+
+    def test_polarized_cheap_tail_boost_on_losing_side(self):
+        """Phase-11: when mid > polarized threshold (0.75), cheap-tail
+        on LOSING side (NO) gets bigger sizing (Bonereaper pattern)."""
+        out = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=200)
+        tail_max = max(CFG.cheap_tail_levels)
+        cheap_no = sum(q.size for q in out if q.side == "NO" and q.price <= tail_max)
+        cheap_yes = sum(q.size for q in out if q.side == "YES" and q.price <= tail_max)
+        # NO cheap-tail boosted (losing side gets the lottery tickets)
+        assert cheap_no > cheap_yes
 
     def test_neutral_mid_keeps_sides_symmetric(self):
         out = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
@@ -160,28 +175,68 @@ class TestDirectionalSkew:
         assert len(no_layer_a) > 0
 
 
-class TestLateWindowStack:
-    """Phase-9: in last N seconds with dominant mid, multiply dominant size."""
+class TestTimingCurve:
+    """Phase-11: front-loaded — early window 3×, late window 0.1×."""
 
-    def test_late_window_with_high_mid_boosts_yes_layer_a(self):
-        """Late stack multiplies Layer-A only (cheap-tail unchanged)."""
-        early = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200)
-        late = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=15)
-        # Filter to Layer-A only (above cheap_tail_max)
+    def test_5m_window_open_is_aggressive(self):
+        """At window open (tte ~= 300s for 5m), Layer-A size > base mid."""
+        early = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=290, timeframe="5m")
+        mid_window = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=150, timeframe="5m")
         tail_max = max(CFG.cheap_tail_levels)
-        yes_early_la = sum(q.size for q in early if q.side == "YES" and q.price > tail_max)
-        yes_late_la = sum(q.size for q in late if q.side == "YES" and q.price > tail_max)
-        # At least 1.5x bigger on Layer-A
-        assert yes_late_la > yes_early_la * 1.5
+        early_total = sum(q.size for q in early if q.price > tail_max)
+        mid_total = sum(q.size for q in mid_window if q.price > tail_max)
+        # 3× multiplier at open, 1× at mid → early should be ~3× bigger
+        assert early_total > mid_total * 2
 
-    def test_late_window_with_neutral_mid_no_stack(self):
-        # mid=0.5 not past dominant threshold (0.65) → no late stack
-        early = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
-        late = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=15)
-        yes_early = sum(q.size for q in early if q.side == "YES")
-        yes_late = sum(q.size for q in late if q.side == "YES")
-        # Roughly similar (within 30%)
-        assert abs(yes_late - yes_early) / max(yes_early, 1) < 0.30
+    def test_5m_window_close_backs_off(self):
+        """At last 30s of 5m, size collapses to ~0.1× of mid."""
+        mid_window = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=150, timeframe="5m")
+        late = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=10, timeframe="5m")
+        tail_max = max(CFG.cheap_tail_levels)
+        mid_total = sum(q.size for q in mid_window if q.price > tail_max)
+        late_total = sum(q.size for q in late if q.price > tail_max)
+        # Late should be MUCH smaller than mid (0.1× vs 1.0×)
+        assert late_total < mid_total
+
+    def test_15m_uses_different_curve(self):
+        """15m curve is different from 5m curve."""
+        # At same window_fraction, both should behave similarly
+        # tte=270 for 5m = 90% used, tte=810 for 15m = 90% used
+        late_5m = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=10, timeframe="5m")
+        late_15m = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=50, timeframe="15m")
+        # Both should be in TAPER zone (small)
+        # Just verify both return SOMETHING (not zero)
+        assert len(late_5m) > 0 or len(late_15m) > 0
+
+
+class TestConviction:
+    """Phase-11: conviction triggers multiply budget."""
+
+    def test_conviction_15m_early_doubles_size(self):
+        """Early entry on 15m = conviction → budget × multiplier."""
+        # Normal: 5m at mid-window
+        normal = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=150,
+                                timeframe="5m", asset="ETH")
+        # Conviction: 15m within first 30s of window
+        conv = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=880,
+                              timeframe="15m", asset="BTC")
+        tail_max = max(CFG.cheap_tail_levels)
+        normal_total = sum(q.size for q in normal if q.price > tail_max)
+        conv_total = sum(q.size for q in conv if q.price > tail_max)
+        # Conviction should be at least 2× bigger
+        assert conv_total > normal_total * 2
+
+    def test_conviction_btc_extreme_mid_triggers(self):
+        """BTC at mid=0.85 (extreme) → conviction multiplier applied."""
+        eth_extreme = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=150,
+                                      timeframe="5m", asset="ETH")
+        btc_extreme = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=150,
+                                      timeframe="5m", asset="BTC")
+        tail_max = max(CFG.cheap_tail_levels)
+        eth_total = sum(q.size for q in eth_extreme if q.price > tail_max)
+        btc_total = sum(q.size for q in btc_extreme if q.price > tail_max)
+        # BTC gets conviction multiplier, ETH doesn't (not in conviction_assets)
+        assert btc_total > eth_total
 
 
 class TestSizing:

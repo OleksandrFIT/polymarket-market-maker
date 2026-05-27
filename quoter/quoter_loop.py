@@ -203,6 +203,8 @@ class QuoterLoop:
                 committed_side=committed,
                 inventory_yes_qty=yes_qty,
                 inventory_no_qty=no_qty,
+                timeframe=market.timeframe,
+                asset=market.asset,
             )
             self.exec.sync(market_id, desired)
 
