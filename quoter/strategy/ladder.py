@@ -1,27 +1,32 @@
 """Compute the desired ladder of resting limit-bids for one market.
 
 Pure function: given mid-of-book, time-to-expiry, inventory imbalance, and
-config — return the list of quotes we WANT to be in. ``OrderManager`` later
-diffs this against currently-live orders to decide cancel/post.
+config — return the list of quotes we WANT to be in.
 
-Strategy (Bonereaper-style market-making):
+Phase-9 Bonereaper-clone strategy:
 
-* Layer A — tight bids: ``ladder_levels`` levels 1¢..N¢ BELOW mid on each
-  side. Sizing increases with depth (deeper offsets get more shares).
-* Layer B — cheap-tail bids: small fixed bets at 1¢, 2¢, 3¢, 5¢ on BOTH
-  sides. Covers tail scenarios (market flips at expiry).
-* Inventory skew: if heavily long one side, skip that side entirely so
-  fills rebalance us. Affects BOTH Layer-A and Layer-B.
-* Directional filter: when mid_yes is past polarization threshold, suppress
-  Layer-A on the losing side (adverse-selection trap). Layer-B cheap-tail
-  remains on BOTH sides — those bids are positive-EV regardless because
-  they only fire on a market reversal.
-* Late-window committed-side bias: in last 60s, scale up sizing on the
-  committed side, scale down opposite.
-* Self-cross prevention: yes_bid + no_bid kept below ``1 - self_cross_buffer``.
+* **Layer A — continuous coverage**: bids on EVERY cent from the top of
+  the cheap-tail up to ``mid - 1¢``. Where Bonereaper has 31-47 quotes
+  per market on a continuous price grid, this replicates that pattern.
+* **Tight cluster** — first ``tight_cluster_levels`` (default 3) cents
+  below mid get a ``2×`` size multiplier. These are first to fill when
+  the ask drops by 1c and we want queue priority there.
+* **Layer B — cheap-tail**: small lottery-ticket bids at 1c..10c on
+  BOTH sides. These fire on a market reversal (e.g. BTC pumps last
+  second when we held cheap NO).
+* **Directional size skew** — when mid is polarized (not 0.5), size
+  winning-side bids LARGER and losing-side SMALLER. Imitates
+  Bonereaper's "let imbalance build with the market" pattern.
+* **Late-window stack** — in the last ``late_window_sec`` seconds, if
+  mid past the dominant threshold, multiply dominant-side sizing by
+  ``late_window_size_multiplier`` (3×). This is Bonereaper's observed
+  "30s-before-expiry $5K stack" behavior.
+* **Inventory skew** — disabled by default in Phase 9 (skew_shares=5000
+  effectively no cap) since Bonereaper lets imbalance build naturally.
+* **Self-cross prevention** — yes_bid + no_bid never sum to
+  ``>= 1 - self_cross_buffer``.
 
-This module has NO awareness of orderbook depth or counterparty. It just
-emits desired state.
+The module has NO awareness of orderbook depth or counterparty.
 """
 
 from __future__ import annotations
@@ -52,62 +57,102 @@ def compute_ladder(
     inventory_yes_qty: int = 0,
     inventory_no_qty: int = 0,
 ) -> list[Quote]:
-    """Return desired bids for one market. Order-of-magnitude 20-50 quotes."""
+    """Return desired bids. 50-100 quotes per market in Phase-9."""
     if not (0.02 <= mid_yes <= 0.98) or time_to_expiry < 5.0:
         return []
 
     mid_no = 1.0 - mid_yes
-    late_window = time_to_expiry < 60.0
+    late_window = time_to_expiry < float(cfg.late_window_sec)
 
-    # Inventory skew: skip side that's already heavily long
+    # Inventory skew (hard cap, default disabled)
     net = inventory_yes_qty - inventory_no_qty
-    skip_yes_layer_a = net > cfg.max_inventory_skew_shares
-    skip_no_layer_a = net < -cfg.max_inventory_skew_shares
-    skip_yes_tail = skip_yes_layer_a
-    skip_no_tail = skip_no_layer_a
+    skip_yes = net > cfg.max_inventory_skew_shares
+    skip_no = net < -cfg.max_inventory_skew_shares
 
-    # Directional filter: market polarized → don't quote Layer-A on losing
-    # side (adverse selection trap). Keep cheap-tail on both sides — those
-    # are positive-EV lottery tickets regardless of direction.
+    # Directional filter (default disabled in Phase 9)
     if cfg.directional_filter_enabled:
         if mid_yes >= cfg.directional_high_threshold:
-            skip_no_layer_a = True  # NO is the losing side
+            skip_no = True
         elif mid_yes <= cfg.directional_low_threshold:
-            skip_yes_layer_a = True  # YES is the losing side
+            skip_yes = True
 
-    out = _layer_a(
-        cfg, mid_yes, mid_no, committed_side, late_window,
-        skip_yes_layer_a, skip_no_layer_a,
+    # Directional size multipliers — size by mid polarization
+    yes_mult, no_mult = _directional_multipliers(cfg, mid_yes, late_window)
+
+    out = _layer_a_continuous(
+        cfg, mid_yes, mid_no, yes_mult, no_mult, skip_yes, skip_no,
     )
-    out.extend(_layer_b_cheap_tail(cfg, mid_yes, mid_no, skip_yes_tail, skip_no_tail))
+    out.extend(_layer_b_cheap_tail(cfg, mid_yes, mid_no, skip_yes, skip_no))
     return _drop_self_crossing(out, cfg.self_cross_buffer)
 
 
-def _layer_a(
+def _directional_multipliers(
+    cfg: Config, mid_yes: float, late_window: bool
+) -> tuple[float, float]:
+    """Compute (yes_mult, no_mult) based on mid polarization.
+
+    When mid is 0.5: both 1.0 (neutral).
+    When mid > 0.5: yes_mult > 1, no_mult < 1 (winning side bigger).
+    Late-window adds extra punch on dominant side past threshold.
+    """
+    yes_mult = no_mult = 1.0
+    if cfg.directional_size_skew_enabled:
+        skew = abs(mid_yes - 0.5) * cfg.directional_skew_coef
+        if mid_yes > 0.5:
+            yes_mult = 1.0 + skew
+            no_mult = 1.0 / max(yes_mult, 0.1)
+        elif mid_yes < 0.5:
+            no_mult = 1.0 + skew
+            yes_mult = 1.0 / max(no_mult, 0.1)
+
+    # Late-window aggressive stack on dominant side past threshold
+    if late_window:
+        thr = cfg.late_window_dominant_threshold
+        mult = cfg.late_window_size_multiplier
+        if mid_yes >= thr:
+            yes_mult *= mult
+        elif mid_yes <= 1.0 - thr:
+            no_mult *= mult
+    return yes_mult, no_mult
+
+
+def _layer_a_continuous(
     cfg: Config,
     mid_yes: float,
     mid_no: float,
-    committed: Side | None,
-    late: bool,
+    yes_mult: float,
+    no_mult: float,
     skip_yes: bool,
     skip_no: bool,
 ) -> list[Quote]:
-    """Tight bids 1¢..N¢ below mid on each side."""
+    """Continuous-coverage layer: bid on every cent from the cheap-tail
+    boundary up to ``mid - 1¢`` on each side."""
     out: list[Quote] = []
+
+    # Determine where Layer-A starts (above cheap_tail_max so we don't
+    # double-quote). Use the max of cheap_tail_levels + 1c.
+    tail_max = max(cfg.cheap_tail_levels)
+    layer_a_min = round(tail_max + 0.01, 2)
+
     for offset_idx in range(1, cfg.ladder_levels + 1):
         offset = offset_idx * 0.01
+
+        # YES side
         if not skip_yes:
-            p = round(mid_yes - offset, 2)
-            if p > 0.01:
-                sz = _size_for(cfg, p, offset_idx, "YES", committed, late)
+            p_yes = round(mid_yes - offset, 2)
+            if p_yes >= layer_a_min:
+                sz = _size_for(cfg, p_yes, offset_idx, "YES", yes_mult)
                 if sz >= 5:
-                    out.append(Quote("YES", p, sz))
+                    out.append(Quote("YES", p_yes, sz))
+
+        # NO side
         if not skip_no:
-            p = round(mid_no - offset, 2)
-            if p > 0.01:
-                sz = _size_for(cfg, p, offset_idx, "NO", committed, late)
+            p_no = round(mid_no - offset, 2)
+            if p_no >= layer_a_min:
+                sz = _size_for(cfg, p_no, offset_idx, "NO", no_mult)
                 if sz >= 5:
-                    out.append(Quote("NO", p, sz))
+                    out.append(Quote("NO", p_no, sz))
+
     return out
 
 
@@ -118,13 +163,13 @@ def _layer_b_cheap_tail(
     skip_yes: bool,
     skip_no: bool,
 ) -> list[Quote]:
-    """Cheap-tail bids at 1¢..5¢ on both sides. ~$2 risk per quote."""
+    """Cheap-tail bids on both sides. Each ~$2 risk per quote."""
     out: list[Quote] = []
     for tail_p in cfg.cheap_tail_levels:
         sz = max(5, int(2.0 / max(tail_p, 0.01)))
-        if not skip_yes and tail_p < mid_yes - 0.10:
+        if not skip_yes and tail_p < mid_yes - 0.05:
             out.append(Quote("YES", tail_p, sz))
-        if not skip_no and tail_p < mid_no - 0.10:
+        if not skip_no and tail_p < mid_no - 0.05:
             out.append(Quote("NO", tail_p, sz))
     return out
 
@@ -134,46 +179,39 @@ def _size_for(
     price: float,
     offset_idx: int,
     side: Side,
-    committed: Side | None,
-    late: bool,
+    directional_mult: float,
 ) -> int:
-    """Size shares for one quote.
+    """Size shares for one Layer-A quote.
 
-    Heuristic: base USDC / price → base shares; deeper offsets get a
-    modest bonus; late-window committed-side gets 50% larger, opposite
-    50% smaller.
+    Base = budget / 2*levels / price (gives ~$1 per quote at mid prices).
+    Tight cluster (first N cents from mid) gets ``tight_cluster_multiplier``.
+    Then ``directional_mult`` (1.0 neutral, 1.5-3x for winning side).
     """
-    # Allocate ~$1 per Layer-A level if budget_per_market_usd=25 and 25 levels
-    base_usd_per_quote = cfg.budget_per_market_usd / max(cfg.ladder_levels * 2, 1)
-    base_shares = max(cfg.quote_base_size, int(base_usd_per_quote / max(price, 0.05)))
-    depth_mult = 1.0 + offset_idx * 0.10
-    skew_mult = 1.0
-    if late and committed is not None:
-        skew_mult = 1.5 if side == committed else 0.5
-    return int(base_shares * depth_mult * skew_mult)
+    base_usd = cfg.budget_per_market_usd / max(cfg.ladder_levels * 2, 1)
+    base_shares = max(cfg.quote_base_size, int(base_usd / max(price, 0.05)))
+
+    # Tight cluster bonus: levels 1..N get extra weight
+    cluster_mult = 1.0
+    if offset_idx <= cfg.tight_cluster_levels:
+        cluster_mult = cfg.tight_cluster_multiplier
+
+    return max(5, int(base_shares * cluster_mult * directional_mult))
 
 
 def _drop_self_crossing(quotes: list[Quote], buffer: float) -> list[Quote]:
-    """Remove (YES, p_y) + (NO, p_n) combos where p_y + p_n >= 1 - buffer.
+    """Remove (YES, p_y) + (NO, p_n) combos where p_y + p_n >= 1 - buffer."""
+    yes_quotes = sorted(
+        [q for q in quotes if q.side == "YES"], key=lambda q: -q.price
+    )
+    no_quotes = sorted(
+        [q for q in quotes if q.side == "NO"], key=lambda q: -q.price
+    )
 
-    Strategy: for each YES quote, find the highest NO quote that crosses
-    and drop the SHALLOWER one (closer to mid) since deeper levels are
-    cheaper inventory.
-    """
-    yes_quotes = sorted([q for q in quotes if q.side == "YES"], key=lambda q: -q.price)
-    no_quotes = sorted([q for q in quotes if q.side == "NO"], key=lambda q: -q.price)
-
-    # Find largest YES price and largest NO price; if they sum too high,
-    # drop the most expensive (closest to mid) on whichever side has more.
-    # Simpler: per-quote check — if any YES.price + any NO.price >= 1-buf,
-    # we need to skip at least one. Easiest: cap each side's max price.
     threshold = 1.0 - buffer
     max_no = no_quotes[0].price if no_quotes else 0.0
     yes_keep = [q for q in yes_quotes if q.price + max_no <= threshold]
     max_yes_kept = yes_keep[0].price if yes_keep else 0.0
     no_keep = [q for q in no_quotes if q.price + max_yes_kept <= threshold]
-    # If we just dropped all NO quotes due to too-high YES, retry: drop top YES
-    # to relax max_yes
     while yes_keep and no_keep and yes_keep[0].price + no_keep[0].price > threshold:
         yes_keep = yes_keep[1:]
 

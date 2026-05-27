@@ -176,7 +176,7 @@ async def _amain() -> None:  # noqa: C901  (entry-point orchestration, hard to s
     lifecycle = MarketLifecycle(
         cfg=cfg, quoter=quoter, executor=executor, poly_ws=poly,
         state=state, inventory=inventory,
-        on_market_added=on_market_added, interval_sec=30,
+        on_market_added=on_market_added, interval_sec=5,
     )
 
     # HTTP dashboard

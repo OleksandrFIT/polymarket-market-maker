@@ -25,31 +25,53 @@ class Config:
     assets: tuple[str, ...] = ("BTC", "ETH")
     timeframes: tuple[str, ...] = ("5m", "15m")
 
-    # ── Ladder parameters ──
-    ladder_levels: int = 12  # offset 1c .. 12c below mid each side
-    cheap_tail_levels: tuple[float, ...] = (0.01, 0.02, 0.03, 0.05)
-    budget_per_market_usd: float = 25.0
-    quote_base_size: int = 10  # shares (Polymarket min 5)
-    self_cross_buffer: float = 0.01  # don't post yes_bid + no_bid >= 1.0 - this
+    # ── Ladder parameters (Phase-9 Bonereaper-clone) ──
+    # CONTINUOUS COVERAGE: a bid on every cent from cheap-tail to mid.
+    # ladder_levels: 12 → 50 (covers ~half the price grid)
+    # cheap_tail: extended to 0.01-0.10 (he goes deep on tails)
+    ladder_levels: int = 50
+    cheap_tail_levels: tuple[float, ...] = (
+        0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
+    )
+    budget_per_market_usd: float = 50.0   # was 25; need more for 50 levels
+    quote_base_size: int = 5              # Polymarket min; let levels add depth
+    self_cross_buffer: float = 0.02       # broader gap to prevent self-cross
 
-    # ── Directional filter (Phase-8 anti-adverse-selection) ──
-    # When mid_yes is "polarized" (market consensus on one side), Layer-A
-    # quotes on the LOSING side are pure adverse-selection traps: they only
-    # fill when the dominant side's flow is pushing through. We suppress
-    # Layer-A on the loser when mid is past the threshold, leaving only
-    # the cheap-tail (Layer-B) on that side as positive-EV lottery tickets.
-    directional_filter_enabled: bool = True
-    directional_high_threshold: float = 0.70  # mid_yes > this → skip Layer-A NO
-    directional_low_threshold: float = 0.30   # mid_yes < this → skip Layer-A YES
+    # ── Tight cluster near top (Bonereaper-style queue priority bid) ──
+    # Cluster of N quotes within K cents of mid with 2× sizing — these are
+    # the first to fill when ask drops by 1c.
+    tight_cluster_levels: int = 3         # 3 extra bids in mid-1c..mid-3c band
+    tight_cluster_multiplier: float = 2.0  # 2× normal size in that band
 
-    # ── Quoter loop ──
-    requote_min_interval_ms: int = 100  # max 10×/sec per market
-    requote_on_mid_move_cents: int = 1  # threshold to mark market dirty
+    # ── Directional filter (Phase-8 — DISABLED in Phase 9 for Bonereaper-style) ──
+    # Bonereaper does NOT skip losing side — he lets imbalance build.
+    # Instead we SIZE losing side smaller (directional_size_skew below).
+    directional_filter_enabled: bool = False
+    directional_high_threshold: float = 0.70
+    directional_low_threshold: float = 0.30
+
+    # ── Directional size skew (Phase-9) ──
+    # When mid polarized, size winning-side bids LARGER, losing-side SMALLER.
+    # Multiplier formula: 1 + |mid - 0.5| × skew_coef on winning side.
+    # At mid=0.5: 1.0× both sides. At mid=0.8: winning 1.6×, losing 0.625×.
+    directional_size_skew_enabled: bool = True
+    directional_skew_coef: float = 2.0
+
+    # ── Late-window aggressive stack (Phase-9) ──
+    # In last N seconds of a window, post HEAVY bids on dominant side at
+    # tight prices (mid-1c, mid-2c). This is Bonereaper's "last-30s loading".
+    late_window_sec: int = 30
+    late_window_size_multiplier: float = 3.0   # 3× normal size on dominant side
+    late_window_dominant_threshold: float = 0.65  # only stack when mid past this
+
+    # ── Quoter loop (Phase-9 faster cycle) ──
+    requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle
+    requote_on_mid_move_cents: int = 1
 
     # ── Risk ──
     max_daily_loss_usd: float = 50.0
-    max_inventory_skew_shares: int = 500
-    max_market_position_usd: float = 200.0
+    max_inventory_skew_shares: int = 5000  # effectively disabled (was 500)
+    max_market_position_usd: float = 500.0
     stop_after_consecutive_loss_days: int = 2
 
     # ── WS health ──
