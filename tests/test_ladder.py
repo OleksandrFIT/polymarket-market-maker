@@ -7,7 +7,7 @@ from dataclasses import replace
 from quoter.config import Config
 from quoter.strategy.ladder import compute_ladder
 
-CFG = Config(ladder_levels=12, budget_per_market_usd=25.0)
+CFG = Config(ladder_levels=12, budget_per_market_usd=25.0, max_inventory_skew_shares=200)
 
 
 class TestLadderSanityGates:
@@ -115,6 +115,51 @@ class TestSelfCrossPrevention:
         yes_max = max((q.price for q in out if q.side == "YES"), default=0)
         no_max = max((q.price for q in out if q.side == "NO"), default=0)
         assert yes_max + no_max <= 1.0 - cfg.self_cross_buffer + 1e-9
+
+
+class TestDirectionalFilter:
+    """Polarized mid → suppress Layer-A on losing side; keep cheap-tail."""
+
+    def test_polarized_high_skips_no_layer_a(self):
+        # mid_yes=0.80 → NO is losing side; Layer-A NO suppressed
+        out = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200)
+        no_layer_a = [q for q in out if q.side == "NO" and q.price >= 0.10]
+        # Layer-B cheap-tail on NO stays
+        no_cheap = [q for q in out if q.side == "NO" and q.price < 0.10]
+        assert len(no_layer_a) == 0
+        assert len(no_cheap) >= 1
+        # YES side still fully populated
+        assert len([q for q in out if q.side == "YES"]) > 8
+
+    def test_polarized_low_skips_yes_layer_a(self):
+        # mid_yes=0.20 → YES is losing; Layer-A YES suppressed
+        out = compute_ladder(CFG, mid_yes=0.20, time_to_expiry=200)
+        yes_layer_a = [q for q in out if q.side == "YES" and q.price >= 0.10]
+        yes_cheap = [q for q in out if q.side == "YES" and q.price < 0.10]
+        assert len(yes_layer_a) == 0
+        assert len(yes_cheap) >= 1
+        assert len([q for q in out if q.side == "NO"]) > 8
+
+    def test_neutral_mid_quotes_both_sides_fully(self):
+        out = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
+        yes = [q for q in out if q.side == "YES"]
+        no = [q for q in out if q.side == "NO"]
+        assert len(yes) > 8
+        assert len(no) > 8
+
+    def test_at_threshold_skip_engages(self):
+        # Exactly at threshold should engage
+        out_high = compute_ladder(CFG, mid_yes=CFG.directional_high_threshold,
+                                   time_to_expiry=200)
+        no_layer_a = [q for q in out_high if q.side == "NO" and q.price >= 0.10]
+        assert len(no_layer_a) == 0
+
+    def test_filter_can_be_disabled(self):
+        from dataclasses import replace
+        cfg = replace(CFG, directional_filter_enabled=False)
+        out = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200)
+        no_layer_a = [q for q in out if q.side == "NO" and q.price >= 0.10]
+        assert len(no_layer_a) > 0  # not suppressed without filter
 
 
 class TestSizing:

@@ -11,7 +11,11 @@ Strategy (Bonereaper-style market-making):
 * Layer B — cheap-tail bids: small fixed bets at 1¢, 2¢, 3¢, 5¢ on BOTH
   sides. Covers tail scenarios (market flips at expiry).
 * Inventory skew: if heavily long one side, skip that side entirely so
-  fills rebalance us.
+  fills rebalance us. Affects BOTH Layer-A and Layer-B.
+* Directional filter: when mid_yes is past polarization threshold, suppress
+  Layer-A on the losing side (adverse-selection trap). Layer-B cheap-tail
+  remains on BOTH sides — those bids are positive-EV regardless because
+  they only fire on a market reversal.
 * Late-window committed-side bias: in last 60s, scale up sizing on the
   committed side, scale down opposite.
 * Self-cross prevention: yes_bid + no_bid kept below ``1 - self_cross_buffer``.
@@ -54,12 +58,28 @@ def compute_ladder(
 
     mid_no = 1.0 - mid_yes
     late_window = time_to_expiry < 60.0
-    net = inventory_yes_qty - inventory_no_qty
-    skip_yes = net > cfg.max_inventory_skew_shares
-    skip_no = net < -cfg.max_inventory_skew_shares
 
-    out = _layer_a(cfg, mid_yes, mid_no, committed_side, late_window, skip_yes, skip_no)
-    out.extend(_layer_b_cheap_tail(cfg, mid_yes, mid_no, skip_yes, skip_no))
+    # Inventory skew: skip side that's already heavily long
+    net = inventory_yes_qty - inventory_no_qty
+    skip_yes_layer_a = net > cfg.max_inventory_skew_shares
+    skip_no_layer_a = net < -cfg.max_inventory_skew_shares
+    skip_yes_tail = skip_yes_layer_a
+    skip_no_tail = skip_no_layer_a
+
+    # Directional filter: market polarized → don't quote Layer-A on losing
+    # side (adverse selection trap). Keep cheap-tail on both sides — those
+    # are positive-EV lottery tickets regardless of direction.
+    if cfg.directional_filter_enabled:
+        if mid_yes >= cfg.directional_high_threshold:
+            skip_no_layer_a = True  # NO is the losing side
+        elif mid_yes <= cfg.directional_low_threshold:
+            skip_yes_layer_a = True  # YES is the losing side
+
+    out = _layer_a(
+        cfg, mid_yes, mid_no, committed_side, late_window,
+        skip_yes_layer_a, skip_no_layer_a,
+    )
+    out.extend(_layer_b_cheap_tail(cfg, mid_yes, mid_no, skip_yes_tail, skip_no_tail))
     return _drop_self_crossing(out, cfg.self_cross_buffer)
 
 

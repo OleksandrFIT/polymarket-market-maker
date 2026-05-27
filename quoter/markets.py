@@ -55,12 +55,16 @@ class Market:
         return self.expire_ts - (now if now is not None else time.time())
 
 
-async def discover_markets(cfg: Config) -> list[Market]:
+async def discover_markets(cfg: Config, min_time_remaining_sec: int = 30) -> list[Market]:
     """Return all currently-active Up/Down markets for configured assets×timeframes.
 
-    Only returns ``negative_risk=False`` markets. Each call constructs the
-    current window timestamp from local clock — caller should re-discover at
-    every new window boundary.
+    Filters out:
+      * negativeRisk markets
+      * markets with ``expires_in <= min_time_remaining_sec`` — too late to
+        bother quoting in the dying seconds of a window.
+
+    Each call constructs the current window timestamp from local clock;
+    caller should re-discover periodically to pick up new windows.
     """
     now = time.time()
     out: list[Market] = []
@@ -78,11 +82,21 @@ async def discover_markets(cfg: Config) -> list[Market]:
                 open_ts = int(now) // window_sec * window_sec
                 slug = f"{asset.lower()}-updown-{tf}-{open_ts}"
                 market = await _fetch_one(client, cfg, asset, tf, slug, open_ts, window_sec)
-                if market:
-                    out.append(market)
-                else:
+                if not market:
                     log.debug("market_not_found", asset=asset, tf=tf, slug=slug)
-    log.info("discover_markets", found=len(out), assets=list(cfg.assets), timeframes=list(cfg.timeframes))
+                    continue
+                if market.time_remaining(now) <= min_time_remaining_sec:
+                    log.debug(
+                        "market_too_late",
+                        asset=asset, tf=tf,
+                        expires_in=int(market.time_remaining(now)),
+                    )
+                    continue
+                out.append(market)
+    log.info(
+        "discover_markets",
+        found=len(out), assets=list(cfg.assets), timeframes=list(cfg.timeframes),
+    )
     return out
 
 

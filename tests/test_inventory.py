@@ -107,6 +107,16 @@ class TestResolution:
         inv.on_resolve("BOGUS", "YES")
         assert inv.realized_pnl == 0
 
+    def test_on_resolve_returns_realized_delta(self):
+        inv = Inventory()
+        inv.on_fill("M1", "NO", 0.40, 100)  # cost $40, NO wins → $100
+        delta = inv.on_resolve("M1", "NO")
+        assert delta == pytest.approx(60.0)
+
+    def test_on_resolve_unknown_market_returns_zero(self):
+        inv = Inventory()
+        assert inv.on_resolve("BOGUS", "YES") == 0.0
+
 
 class TestSnapshot:
     def test_snapshot_includes_realized_and_open(self):
@@ -127,3 +137,17 @@ class TestSnapshot:
         snap = inv.snapshot()
         assert snap["open_markets"] == 0
         assert snap["realized_pnl"] == pytest.approx(60.0)
+
+
+class TestReset:
+    def test_reset_clears_all_state(self):
+        inv = Inventory()
+        inv.on_fill("M1", "YES", 0.40, 10)
+        inv.on_fill("M2", "NO", 0.50, 20)
+        inv.on_resolve("M2", "NO")
+        inv.reset()
+        assert inv.realized_pnl == 0.0
+        assert inv.n_fills == 0
+        assert inv.n_merges == 0
+        assert inv.n_resolutions == 0
+        assert len(inv.positions) == 0

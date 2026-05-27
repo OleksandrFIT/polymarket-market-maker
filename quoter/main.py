@@ -31,6 +31,7 @@ from quoter.execution.paper_executor import PaperExecutor  # noqa: E402
 from quoter.execution.shadow_executor import ShadowExecutor  # noqa: E402
 from quoter.feeds.binance_ws import BinanceWS  # noqa: E402
 from quoter.feeds.poly_market_ws import PolyMarketWS  # noqa: E402
+from quoter.lifecycle.market_lifecycle import MarketLifecycle  # noqa: E402
 from quoter.markets import Market, discover_markets  # noqa: E402
 from quoter.ops.logger import get_logger, setup_logging  # noqa: E402
 from quoter.ops.metrics import make_app, serve_forever  # noqa: E402
@@ -110,7 +111,7 @@ async def _init_state(cfg: Config, markets: list[Market]) -> tuple[State | None,
     return state, session_ts
 
 
-async def _amain() -> None:
+async def _amain() -> None:  # noqa: C901  (entry-point orchestration, hard to split further)
     cfg = Config.from_env()
     setup_logging(cfg.log_path, cfg.log_level)
     log = get_logger("main")
@@ -122,12 +123,8 @@ async def _amain() -> None:
 
     markets = await discover_markets(cfg)
     if not markets:
-        log.error("no_markets_discovered_exiting")
-        return
-    by_token: dict[str, Market] = {}
+        log.warning("no_markets_at_startup_will_keep_polling")
     for m in markets:
-        by_token[m.yes_token] = m
-        by_token[m.no_token] = m
         log.info(
             "market_active",
             asset=m.asset, tf=m.timeframe,
@@ -152,8 +149,18 @@ async def _amain() -> None:
         get_binance_price=binance_latest.get,
         on_fill=on_fill,
     )
-    for token in by_token:
-        book_manager.subscribe(token, _make_book_listener(quoter))
+    # Subscribe listener for any token added later via MarketLifecycle.
+    # We subscribe per-token on first event arrival lazily — the listener
+    # is the same closure for every token. Simpler: register for current
+    # tokens at startup and re-register when new markets land.
+    book_listener = _make_book_listener(quoter)
+    for token in quoter.known_tokens():
+        book_manager.subscribe(token, book_listener)
+
+    async def on_market_added(m: Market) -> None:
+        """Hook from MarketLifecycle when a new market joins tracking."""
+        book_manager.subscribe(m.yes_token, book_listener)
+        book_manager.subscribe(m.no_token, book_listener)
 
     async def on_btc_price(asset: str, price: float, _ts: float) -> None:
         binance_latest[asset] = price
@@ -164,18 +171,26 @@ async def _amain() -> None:
 
     binance = BinanceWS(cfg.assets, on_btc_price)
     poly = PolyMarketWS(cfg.ws_market_url, on_poly_event)
-    poly.set_subscriptions(list(by_token.keys()))
+    poly.set_subscriptions(quoter.known_tokens())
+
+    lifecycle = MarketLifecycle(
+        cfg=cfg, quoter=quoter, executor=executor, poly_ws=poly,
+        state=state, inventory=inventory,
+        on_market_added=on_market_added, interval_sec=30,
+    )
 
     # HTTP dashboard
     dashboard_app = make_app(
         cfg=cfg, inventory=inventory, executor=executor, quoter=quoter,
-        risk=risk, markets=markets, book_manager=book_manager, state=state,
+        risk=risk, book_manager=book_manager, state=state,
+        session_ts=session_ts,
     )
 
     tasks = [
         asyncio.create_task(binance.run(), name="binance_ws"),
         asyncio.create_task(poly.run(), name="poly_market_ws"),
         asyncio.create_task(quoter.run(), name="quoter_loop"),
+        asyncio.create_task(lifecycle.run(), name="market_lifecycle"),
         asyncio.create_task(
             _periodic_snapshot(log, inventory, executor, quoter, state),
             name="snapshot_loop",

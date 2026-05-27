@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from quoter.book.local_book import Top
 from quoter.execution.paper_executor import PaperExecutor
 from quoter.strategy.ladder import Quote
@@ -141,3 +139,18 @@ class TestPaperFills:
         )
         sides = sorted(f.side for f in fills)
         assert sides == ["NO", "YES"]
+
+
+class TestReset:
+    def test_reset_clears_orders_and_counters(self):
+        ex = PaperExecutor()
+        ex.sync("M1", [_quote("YES", 0.50), _quote("NO", 0.30)])
+        ex.reset()
+        s = ex.stats()
+        assert s["live_quotes_total"] == 0
+        assert s["live_markets"] == 0
+        assert s["cumulative_posts"] == 0
+        assert s["cumulative_cancels"] == 0
+        assert s["cumulative_fills"] == 0
+        assert s["sync_count"] == 0
+        assert ex.for_market("M1") == {}

@@ -32,6 +32,16 @@ class Config:
     quote_base_size: int = 10  # shares (Polymarket min 5)
     self_cross_buffer: float = 0.01  # don't post yes_bid + no_bid >= 1.0 - this
 
+    # ── Directional filter (Phase-8 anti-adverse-selection) ──
+    # When mid_yes is "polarized" (market consensus on one side), Layer-A
+    # quotes on the LOSING side are pure adverse-selection traps: they only
+    # fill when the dominant side's flow is pushing through. We suppress
+    # Layer-A on the loser when mid is past the threshold, leaving only
+    # the cheap-tail (Layer-B) on that side as positive-EV lottery tickets.
+    directional_filter_enabled: bool = True
+    directional_high_threshold: float = 0.70  # mid_yes > this → skip Layer-A NO
+    directional_low_threshold: float = 0.30   # mid_yes < this → skip Layer-A YES
+
     # ── Quoter loop ──
     requote_min_interval_ms: int = 100  # max 10×/sec per market
     requote_on_mid_move_cents: int = 1  # threshold to mark market dirty

@@ -46,3 +46,45 @@ async def test_session_lifecycle(state):
     assert ts > 0
     await state.end_session(ts, final_pnl=15.5)
     # Sanity: nothing crashed; concrete query helpers not added yet
+
+
+class TestResolvedMarkets:
+    async def test_mark_resolved_records_winner_and_pnl(self, state):
+        await state.upsert_market("M1", "BTC", "5m", 100, 400, "y", "n")
+        await state.mark_market_resolved("M1", "NO", realized_pnl=12.5)
+        rows = await state.resolved_markets()
+        assert len(rows) == 1
+        market_id, asset, timeframe, winning_side, pnl, _resolved_at = rows[0]
+        assert market_id == "M1"
+        assert asset == "BTC"
+        assert timeframe == "5m"
+        assert winning_side == "NO"
+        assert pnl == 12.5
+
+    async def test_resolved_markets_excludes_open(self, state):
+        await state.upsert_market("M1", "BTC", "5m", 100, 400, "y", "n")  # stays OPEN
+        assert await state.resolved_markets() == []
+
+    async def test_resolved_markets_newest_first(self, state):
+        await state.upsert_market("M1", "BTC", "5m", 100, 400, "y", "n")
+        await state.upsert_market("M2", "ETH", "5m", 100, 400, "y", "n")
+        await state.mark_market_resolved("M1", "YES", realized_pnl=1.0)
+        await state.mark_market_resolved("M2", "NO", realized_pnl=2.0)
+        rows = await state.resolved_markets()
+        assert [r[0] for r in rows] == ["M2", "M1"]
+
+
+class TestClearAll:
+    async def test_clear_all_empties_tables(self, state):
+        await state.record_fill("M1", "YES", 0.5, 10, source="paper")
+        await state.upsert_position("M1", 10, 0, 5.0, 0.0)
+        await state.upsert_market("M1", "BTC", "5m", 100, 400, "y", "n")
+        await state.start_session("paper", 100.0)
+        await state.clear_all()
+        assert await state.n_fills() == 0
+        assert await state.load_positions() == []
+        assert await state.resolved_markets() == []
+        async with state.db.execute("SELECT COUNT(*) FROM markets") as cur:
+            assert (await cur.fetchone())[0] == 0
+        async with state.db.execute("SELECT COUNT(*) FROM sessions") as cur:
+            assert (await cur.fetchone())[0] == 0

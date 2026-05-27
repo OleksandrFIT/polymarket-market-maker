@@ -67,6 +67,15 @@ class PaperExecutor:
 
     # ── Executor protocol ──
 
+    def reset(self) -> None:
+        """Drop all live orders and zero metrics — 'clear all data' action."""
+        self._live.clear()
+        self._ask_at_sync.clear()
+        self._sync_count = 0
+        self._cum_posts = 0
+        self._cum_cancels = 0
+        self._cum_fills = 0
+
     def for_market(self, market_id: str) -> dict[tuple[str, float], PaperOrder]:
         return self._live.setdefault(market_id, {})
 

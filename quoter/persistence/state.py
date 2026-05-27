@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS markets (
     strike       REAL DEFAULT 0,
     status       TEXT DEFAULT 'OPEN',  -- OPEN | CLOSED | RESOLVED
     winning_side TEXT,                  -- 'YES' | 'NO' | NULL
+    resolved_pnl REAL,                  -- realized P&L at resolution
+    resolved_at  REAL,                  -- unix ts of resolution
     yes_token    TEXT,
     no_token     TEXT,
     discovered_at REAL
@@ -77,8 +79,20 @@ class State:
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA cache_size=-64000")  # 64MB
         await self._db.executescript(_SCHEMA)
+        await self._migrate()
         await self._db.commit()
         log.info("state_opened", path=self._path)
+
+    async def _migrate(self) -> None:
+        """Additive column migrations for DBs created by older schema versions."""
+        for ddl in (
+            "ALTER TABLE markets ADD COLUMN resolved_pnl REAL",
+            "ALTER TABLE markets ADD COLUMN resolved_at REAL",
+        ):
+            try:
+                await self.db.execute(ddl)
+            except Exception:
+                pass  # column already present
 
     async def close(self) -> None:
         if self._db is not None:
@@ -170,12 +184,34 @@ class State:
         )
         await self.db.commit()
 
-    async def mark_market_resolved(self, market_id: str, winning_side: str) -> None:
+    async def mark_market_resolved(
+        self, market_id: str, winning_side: str, realized_pnl: float = 0.0
+    ) -> None:
         await self.db.execute(
-            "UPDATE markets SET status='RESOLVED', winning_side=? WHERE market_id=?",
-            (winning_side, market_id),
+            "UPDATE markets SET status='RESOLVED', winning_side=?, "
+            "resolved_pnl=?, resolved_at=? WHERE market_id=?",
+            (winning_side, realized_pnl, time.time(), market_id),
         )
         await self.db.commit()
+
+    async def resolved_markets(self) -> list[tuple[Any, ...]]:
+        """All resolved markets, newest resolution first.
+
+        Rows: ``(market_id, asset, timeframe, winning_side, resolved_pnl, resolved_at)``.
+        """
+        async with self.db.execute(
+            "SELECT market_id, asset, timeframe, winning_side, resolved_pnl, resolved_at "
+            "FROM markets WHERE status='RESOLVED' "
+            "ORDER BY resolved_at DESC, rowid DESC"
+        ) as cur:
+            return await cur.fetchall()
+
+    async def clear_all(self) -> None:
+        """Delete all rows from every table — operator 'clear all data' action."""
+        for table in ("fills", "positions", "markets", "sessions"):
+            await self.db.execute(f"DELETE FROM {table}")
+        await self.db.commit()
+        log.warning("state_cleared_all")
 
     # ── Sessions ──
 

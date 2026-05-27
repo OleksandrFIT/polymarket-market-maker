@@ -46,8 +46,9 @@ class TestConfig:
         assert c.log_level == "DEBUG"
 
     def test_frozen(self):
+        from dataclasses import FrozenInstanceError
         c = Config()
-        with pytest.raises(Exception):  # FrozenInstanceError or AttributeError
+        with pytest.raises(FrozenInstanceError):
             c.bankroll_usd = 999  # type: ignore[misc]
 
 

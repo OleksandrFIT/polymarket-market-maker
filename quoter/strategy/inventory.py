@@ -100,16 +100,29 @@ class Inventory:
         p.no_cost_total -= actual * no_avg
         self.n_merges += 1
 
-    def on_resolve(self, market_id: str, winning_side: Side) -> None:
-        """Resolve market: ``winning_side`` shares pay $1, opposite pays $0."""
+    def on_resolve(self, market_id: str, winning_side: Side) -> float:
+        """Resolve market: ``winning_side`` shares pay $1, opposite pays $0.
+
+        Returns the realized P&L delta for this market ($0 if not held).
+        """
         p = self.positions.pop(market_id, None)
         if p is None:
-            return
+            return 0.0
         win_qty = p.yes_qty if winning_side == "YES" else p.no_qty
         cost = p.total_cost
         revenue = float(win_qty)  # $1 each
-        self.realized_pnl += revenue - cost
+        delta = revenue - cost
+        self.realized_pnl += delta
         self.n_resolutions += 1
+        return delta
+
+    def reset(self) -> None:
+        """Wipe all positions and counters — operator 'clear all data' action."""
+        self.positions.clear()
+        self.realized_pnl = 0.0
+        self.n_fills = 0
+        self.n_merges = 0
+        self.n_resolutions = 0
 
     # ── Queries ──
 

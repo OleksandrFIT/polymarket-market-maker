@@ -79,6 +79,31 @@ class QuoterLoop:
         self._last_requote_ts: dict[str, float] = {}
         self._tick_count = 0
 
+    # ── Dynamic market lifecycle ──
+
+    def add_market(self, m: Market) -> bool:
+        """Register a new market for tracking. Returns True if added (False if
+        already present)."""
+        if m.market_id in self.markets:
+            return False
+        self.markets[m.market_id] = m
+        self._token_to_market[m.yes_token] = m.market_id
+        self._token_to_market[m.no_token] = m.market_id
+        return True
+
+    def remove_market(self, market_id: str) -> Market | None:
+        """Drop a market from tracking. Returns the removed Market or None."""
+        m = self.markets.pop(market_id, None)
+        if m is not None:
+            self._token_to_market.pop(m.yes_token, None)
+            self._token_to_market.pop(m.no_token, None)
+            self._dirty.discard(market_id)
+        return m
+
+    def known_tokens(self) -> list[str]:
+        """All YES + NO token_ids across currently tracked markets."""
+        return list(self._token_to_market.keys())
+
     # ── Dirty-marking hooks (called from WS listeners) ──
 
     def mark_dirty_by_token(self, token_id: str) -> None:
@@ -146,6 +171,16 @@ class QuoterLoop:
 
         async with self._market_locks[market_id]:
             self._last_requote_ts[market_id] = now
+
+            # Per-market exposure gate: if THIS market is over its caps, pull
+            # its quotes and skip — but keep quoting every other market.
+            market_reason = self.risk.check_market(market_id)
+            if market_reason is not None:
+                n = self.exec.cancel_all_for_market(market_id)
+                if n > 0:
+                    log.info("market_risk_paused", market=market_id[:12], reason=market_reason)
+                return
+
             yes_top = self.bm.top(market.yes_token)
             no_top = self.bm.top(market.no_token)
             mid_yes = self._infer_mid_yes(yes_top, no_top)
