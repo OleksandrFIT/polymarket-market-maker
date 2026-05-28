@@ -46,7 +46,7 @@ class Config:
     # ── Directional filter (Phase-8 — DISABLED in Phase 9 for Bonereaper-style) ──
     # Bonereaper does NOT skip losing side — he lets imbalance build.
     # Instead we SIZE losing side smaller (directional_size_skew below).
-    directional_filter_enabled: bool = True  # Phase-13: RE-ENABLED (was best @ Phase 7/8)
+    directional_filter_enabled: bool = False  # Phase-14: data showed it loads losing side
     directional_high_threshold: float = 0.70
     directional_low_threshold: float = 0.30
 
@@ -54,8 +54,15 @@ class Config:
     # When mid polarized, size winning-side bids LARGER, losing-side SMALLER.
     # Multiplier formula: 1 + |mid - 0.5| × skew_coef on winning side.
     # At mid=0.5: 1.0× both sides. At mid=0.8: winning 1.6×, losing 0.625×.
-    directional_size_skew_enabled: bool = True
+    directional_size_skew_enabled: bool = False  # Phase-14: off (amplified losing side)
     directional_skew_coef: float = 2.0
+
+    # ── Phase-14 entry discipline (Bonereaper-style early-entry + price-cap) ──
+    # Data (2026-05-28): -$208 of -$247 loss came from fills after 66% of the
+    # window; -$162 from fills above price 0.60 (chasing the favorite into
+    # whipsaw). Stop adding inventory late, and never bid above max_entry_price.
+    entry_cutoff_frac: float = 0.50   # no new quotes after this fraction of window
+    max_entry_price: float = 0.60     # drop any quote priced above this
 
     # ── Late-window aggressive stack (Phase-9 — DEPRECATED in Phase 11) ──
     # Phase 9 thought Bonereaper does ×3 in last 30s. Data showed OPPOSITE:

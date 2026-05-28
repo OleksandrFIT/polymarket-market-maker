@@ -51,6 +51,14 @@ class TestConfig:
         with pytest.raises(FrozenInstanceError):
             c.bankroll_usd = 999  # type: ignore[misc]
 
+    def test_new_tactic_defaults(self):
+        c = Config()
+        assert c.entry_cutoff_frac == 0.50
+        assert c.max_entry_price == 0.60
+        # chase-the-favorite layers OFF by default (proven to hurt)
+        assert c.directional_filter_enabled is False
+        assert c.directional_size_skew_enabled is False
+
 
 class TestPolyCreds:
     GOOD_ENV = {
