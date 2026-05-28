@@ -81,6 +81,10 @@ def compute_ladder(  # noqa: C901  (orchestration of many strategy layers)
     time_into_window = max(0.0, window_length_sec - time_to_expiry)
     window_frac = min(1.0, time_into_window / window_length_sec)
 
+    # ── Phase-14: late-stop — no NEW inventory after entry cutoff ──
+    if window_frac > cfg.entry_cutoff_frac:
+        return []
+
     # ── Phase-11: TIMING multiplier from front-loaded curve ──
     timing_mult = _timing_multiplier(cfg, timeframe, window_frac)
 

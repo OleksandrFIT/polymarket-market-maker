@@ -343,3 +343,19 @@ class TestSizing:
             cluster_avg = sum(q.size for q in yes[:3]) / 3
             mid_depth_avg = sum(q.size for q in yes[5:8]) / 3
             assert cluster_avg >= mid_depth_avg  # cluster boosted
+
+
+class TestEntryCutoff:
+    def test_no_quotes_after_cutoff(self):
+        cfg = replace(CFG, entry_cutoff_frac=0.50)
+        # 5m window = 300s. At tte=60s we are 240/300 = 80% in → past cutoff.
+        out = compute_ladder(cfg, mid_yes=0.50, time_to_expiry=60,
+                             timeframe="5m")
+        assert out == []
+
+    def test_quotes_before_cutoff(self):
+        cfg = replace(CFG, entry_cutoff_frac=0.50)
+        # tte=240s → 60/300 = 20% in → before cutoff.
+        out = compute_ladder(cfg, mid_yes=0.50, time_to_expiry=240,
+                             timeframe="5m")
+        assert len(out) > 0
