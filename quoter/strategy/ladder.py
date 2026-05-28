@@ -92,17 +92,22 @@ def compute_ladder(  # noqa: C901  (orchestration of many strategy layers)
         cfg.conviction_budget_multiplier if is_conviction else 1.0
     )
 
-    # Inventory skew (hard cap, default disabled in Phase 9)
+    # Inventory skew (hard cap, default disabled in Phase 9) — applies to BOTH layers
     net = inventory_yes_qty - inventory_no_qty
-    skip_yes = net > cfg.max_inventory_skew_shares
-    skip_no = net < -cfg.max_inventory_skew_shares
+    skip_yes_inv = net > cfg.max_inventory_skew_shares
+    skip_no_inv = net < -cfg.max_inventory_skew_shares
 
-    # Directional filter (default OFF since Phase 9)
+    # ── Phase-13: Directional filter — blocks LAYER-A on losing side ONLY ──
+    # (Phase 7/8's +$921 structure restored). Cheap-tail (Layer-B) stays on
+    # BOTH sides — those $0.01-0.10 lottery tickets are cheap + positive-EV
+    # on a reversal, so we never want to suppress them.
+    skip_yes_a = skip_yes_inv
+    skip_no_a = skip_no_inv
     if cfg.directional_filter_enabled:
         if mid_yes >= cfg.directional_high_threshold:
-            skip_no = True
+            skip_no_a = True   # NO is losing → no NO Layer-A
         elif mid_yes <= cfg.directional_low_threshold:
-            skip_yes = True
+            skip_yes_a = True  # YES is losing → no YES Layer-A
 
     # ── Phase-12: Directional size multipliers GATED by velocity ──
     yes_mult, no_mult = _directional_multipliers(cfg, mid_yes, velocity_short)
@@ -111,10 +116,11 @@ def compute_ladder(  # noqa: C901  (orchestration of many strategy layers)
     no_mult *= timing_mult
 
     out = _layer_a_continuous(
-        cfg, mid_yes, mid_no, yes_mult, no_mult, skip_yes, skip_no, budget,
+        cfg, mid_yes, mid_no, yes_mult, no_mult, skip_yes_a, skip_no_a, budget,
     )
+    # Cheap-tail uses INVENTORY skip only (not directional filter)
     out.extend(_layer_b_cheap_tail(
-        cfg, mid_yes, mid_no, skip_yes, skip_no, budget, timing_mult,
+        cfg, mid_yes, mid_no, skip_yes_inv, skip_no_inv, budget, timing_mult,
     ))
     return _drop_self_crossing(out, cfg.self_cross_buffer)
 

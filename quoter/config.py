@@ -46,7 +46,7 @@ class Config:
     # ── Directional filter (Phase-8 — DISABLED in Phase 9 for Bonereaper-style) ──
     # Bonereaper does NOT skip losing side — he lets imbalance build.
     # Instead we SIZE losing side smaller (directional_size_skew below).
-    directional_filter_enabled: bool = False
+    directional_filter_enabled: bool = True  # Phase-13: RE-ENABLED (was best @ Phase 7/8)
     directional_high_threshold: float = 0.70
     directional_low_threshold: float = 0.30
 
