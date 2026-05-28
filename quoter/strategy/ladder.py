@@ -126,6 +126,8 @@ def compute_ladder(  # noqa: C901  (orchestration of many strategy layers)
     out.extend(_layer_b_cheap_tail(
         cfg, mid_yes, mid_no, skip_yes_inv, skip_no_inv, budget, timing_mult,
     ))
+    # ── Phase-14: price-cap — never bid above max_entry_price (anti-chase) ──
+    out = [q for q in out if q.price <= cfg.max_entry_price]
     return _drop_self_crossing(out, cfg.self_cross_buffer)
 
 

@@ -94,8 +94,17 @@ class TestLateWindowSkew:
     """Phase-11: late window NEUTRALIZED — timing curve handles aggression."""
 
     def test_committed_yes_still_dominates_via_directional_skew(self):
-        """Polarized mid=0.8 → YES bigger via directional_size_skew (not late stack)."""
-        out = compute_ladder(CFG, mid_yes=0.8, time_to_expiry=30,
+        """Polarized mid=0.8 → YES bigger via directional_size_skew (not late stack).
+
+        Phase-14: skew is OFF by default (proved to amplify losing side); this
+        test exercises the skew BEHAVIOR, so it opts-in explicitly. tte=160s
+        keeps us before the Phase-14 entry cutoff (frac 0.50 of a 5m window),
+        and max_entry_price is lifted so the YES Layer-A near 0.80 isn't dropped
+        by the default 0.60 price-cap.
+        """
+        cfg = replace(CFG, directional_filter_enabled=True,
+                      directional_size_skew_enabled=True, max_entry_price=0.99)
+        out = compute_ladder(cfg, mid_yes=0.8, time_to_expiry=160,
                               committed_side="YES", timeframe="5m")
         tail_max = max(CFG.cheap_tail_levels)
         yes_la = sum(q.size for q in out if q.side == "YES" and q.price > tail_max)
@@ -103,7 +112,9 @@ class TestLateWindowSkew:
         assert yes_la > no_la  # Layer-A YES dominates polarized
 
     def test_no_skew_when_no_committed_side(self):
-        out = compute_ladder(CFG, mid_yes=0.5, time_to_expiry=30, committed_side=None,
+        # Phase-14: tte=160s is before the entry cutoff (frac 0.50 of 5m window);
+        # the old tte=30s now falls past the late-stop and returns [].
+        out = compute_ladder(CFG, mid_yes=0.5, time_to_expiry=160, committed_side=None,
                               timeframe="5m")
         assert len(out) > 0
 
@@ -127,9 +138,15 @@ class TestDirectionalSkew:
     boosts LOSING side (polarized cheap-tail dominance)."""
 
     def test_polarized_high_layer_a_yes_bigger(self):
-        """Layer-A YES grows when mid > 0.5 (winning side scaling)."""
-        out_neutral = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
-        out_high = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200)
+        """Layer-A YES grows when mid > 0.5 (winning side scaling).
+
+        Phase-14: opt-in to directional skew (off by default) and lift the
+        price-cap so the YES Layer-A at mid=0.80 is not dropped by the cap.
+        """
+        cfg = replace(CFG, directional_filter_enabled=True,
+                      directional_size_skew_enabled=True, max_entry_price=0.99)
+        out_neutral = compute_ladder(cfg, mid_yes=0.50, time_to_expiry=200)
+        out_high = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200)
         tail_max = max(CFG.cheap_tail_levels)
         # Layer-A only (exclude cheap-tail)
         yes_neutral = sum(q.size for q in out_neutral if q.side == "YES" and q.price > tail_max)
@@ -140,8 +157,12 @@ class TestDirectionalSkew:
         assert no_high < no_neutral    # losing side smaller
 
     def test_polarized_low_layer_a_no_bigger(self):
-        out_low = compute_ladder(CFG, mid_yes=0.20, time_to_expiry=200)
-        out_neutral = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
+        # Phase-14: opt-in to skew/filter and lift the cap (NO bids at mid_no=0.80
+        # would otherwise be dropped by the default 0.60 price-cap).
+        cfg = replace(CFG, directional_filter_enabled=True,
+                      directional_size_skew_enabled=True, max_entry_price=0.99)
+        out_low = compute_ladder(cfg, mid_yes=0.20, time_to_expiry=200)
+        out_neutral = compute_ladder(cfg, mid_yes=0.50, time_to_expiry=200)
         tail_max = max(CFG.cheap_tail_levels)
         no_low = sum(q.size for q in out_low if q.side == "NO" and q.price > tail_max)
         no_neutral = sum(q.size for q in out_neutral if q.side == "NO" and q.price > tail_max)
@@ -167,17 +188,18 @@ class TestDirectionalSkew:
         # Allow small drift from rounding
         assert abs(yes_size - no_size) <= max(yes_size, no_size) * 0.20
 
-    def test_filter_enabled_by_default_phase13(self):
-        # Phase-13: directional_filter_enabled = True
-        # At mid=0.80 (polarized > 0.70), NO Layer-A is FILTERED out.
-        out = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200)
+    def test_filter_disabled_by_default_phase14(self):
+        # Phase-14: directional_filter_enabled = False by default (it loaded the
+        # losing side and lost money). At mid=0.80 the losing side (NO) Layer-A is
+        # therefore NOT filtered — both sides keep their near-mid bids.
+        # max_entry_price lifted so the price-cap doesn't confound the filter check.
+        cfg = replace(CFG, max_entry_price=0.99)
+        out = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200)
         tail_max = max(CFG.cheap_tail_levels)
         no_layer_a = [q for q in out if q.side == "NO" and q.price > tail_max]
-        no_tail = [q for q in out if q.side == "NO" and q.price <= tail_max]
-        assert len(no_layer_a) == 0   # filtered (losing side)
-        assert len(no_tail) > 0       # cheap-tail lottery tickets KEPT
-        # Winning side (YES) Layer-A fully populated
-        assert len([q for q in out if q.side == "YES" and q.price > tail_max]) > 8
+        yes_layer_a = [q for q in out if q.side == "YES" and q.price > tail_max]
+        assert len(no_layer_a) > 0    # NOT filtered (default filter is OFF)
+        assert len(yes_layer_a) > 8   # winning side Layer-A also populated
 
     def test_filter_can_be_disabled(self):
         cfg = replace(CFG, directional_filter_enabled=False)
@@ -211,14 +233,24 @@ class TestTimingCurve:
         assert late_total < mid_total
 
     def test_15m_uses_different_curve(self):
-        """15m curve is different from 5m curve."""
-        # At same window_fraction, both should behave similarly
-        # tte=270 for 5m = 90% used, tte=810 for 15m = 90% used
-        late_5m = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=10, timeframe="5m")
-        late_15m = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=50, timeframe="15m")
-        # Both should be in TAPER zone (small)
-        # Just verify both return SOMETHING (not zero)
-        assert len(late_5m) > 0 or len(late_15m) > 0
+        """15m and 5m pick different timing-curve buckets at the same fraction.
+
+        Phase-14: the old tte values (10s/50s) now fall PAST the entry cutoff
+        (frac 0.50) and return []. Use the latest pre-cutoff fraction (0.50) for
+        each window: tte=150s for 5m (BASE bucket) and tte=450s for 15m (VALLEY
+        bucket). The curves differ at that fraction, so per-quote sizing differs
+        even though both still emit quotes.
+        """
+        late_5m = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=150, timeframe="5m")
+        late_15m = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=450, timeframe="15m")
+        # Both emit quotes at frac 0.50 (before the cutoff) ...
+        assert len(late_5m) > 0 and len(late_15m) > 0
+        tail_max = max(CFG.cheap_tail_levels)
+        total_5m = sum(q.size for q in late_5m if q.price > tail_max)
+        total_15m = sum(q.size for q in late_15m if q.price > tail_max)
+        # ... but the per-timeframe curves differ at the same fraction (5m BASE
+        # 1.0× vs 15m VALLEY 0.3×) → different Layer-A totals.
+        assert total_5m != total_15m
 
 
 class TestVelocityGate:
@@ -235,11 +267,16 @@ class TestVelocityGate:
         return sum(q.size for q in out if q.side == "YES" and q.price > tail_max)
 
     def test_velocity_agrees_amplifies_yes_vs_velocity_opposes(self):
-        """At mid=0.80: velocity UP → bigger YES; velocity DOWN → smaller YES."""
-        agree = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200,
+        """At mid=0.80: velocity UP → bigger YES; velocity DOWN → smaller YES.
+
+        Phase-14: opt-in to skew (off by default) and lift the price-cap so the
+        YES Layer-A near 0.80 isn't dropped by the default 0.60 cap.
+        """
+        cfg = replace(CFG, directional_size_skew_enabled=True, max_entry_price=0.99)
+        agree = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200,
                                 timeframe="5m", asset="ETH",  # no conviction
                                 velocity_short=0.003)
-        oppose = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200,
+        oppose = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200,
                                   timeframe="5m", asset="ETH",
                                   velocity_short=-0.003)
         yes_agree = self._yes_total_la(agree)
@@ -259,11 +296,15 @@ class TestVelocityGate:
         assert abs(self._yes_total_la(neutral) - self._yes_total_la(no_velo)) <= 10
 
     def test_no_velocity_equivalent_to_skew_on(self):
-        """velocity_short=None → skew applied (backward compat)."""
-        no_velo = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200,
+        """velocity_short=None → skew applied (backward compat).
+
+        Phase-14: opt-in to skew and lift the price-cap (see sibling test).
+        """
+        cfg = replace(CFG, directional_size_skew_enabled=True, max_entry_price=0.99)
+        no_velo = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200,
                                    timeframe="5m", asset="ETH",
                                    velocity_short=None)
-        oppose = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200,
+        oppose = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200,
                                   timeframe="5m", asset="ETH",
                                   velocity_short=-0.003)
         # No velocity → skew applied → bigger than oppose case
@@ -359,3 +400,15 @@ class TestEntryCutoff:
         out = compute_ladder(cfg, mid_yes=0.50, time_to_expiry=240,
                              timeframe="5m")
         assert len(out) > 0
+
+
+class TestPriceCap:
+    def test_no_quote_above_cap(self):
+        cfg = replace(CFG, max_entry_price=0.60)
+        # mid_yes=0.85 → YES bids near 0.84, 0.83... must all be dropped;
+        # NO bids near 0.14 survive.
+        out = compute_ladder(cfg, mid_yes=0.85, time_to_expiry=240,
+                             timeframe="5m")
+        assert out, "expected some (cheap NO) quotes"
+        assert all(q.price <= 0.60 for q in out), \
+            f"quote above cap: {[q for q in out if q.price > 0.60]}"
