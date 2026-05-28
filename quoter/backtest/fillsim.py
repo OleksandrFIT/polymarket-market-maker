@@ -3,6 +3,10 @@
 Coarse on purpose (CLOB history is ~1 sample/min): a resting BUY bid fills
 in full when its side's market price dips to/below the bid price over the
 interval. Identical rule for every config so A/B comparisons are fair.
+
+The engine re-quotes every interval, so a bid that stays below market fills
+again each interval — absolute size/cost are inflated and not comparable to
+live. Only the *relative* A/B direction is meaningful.
 """
 
 from __future__ import annotations
