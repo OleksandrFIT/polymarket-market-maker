@@ -11,10 +11,10 @@ def _win_market():
 
 def test_buying_winner_cheap_is_profitable():
     cfg = Config(max_inventory_skew_shares=200)
-    # YES sits cheap early (0.30) then climbs to 0.99 → our YES bids at <=0.30
-    # fill early, resolve to $1 each → positive PnL.
-    series = [PricePoint(0, 0.30), PricePoint(60, 0.30),
-              PricePoint(120, 0.55), PricePoint(180, 0.99)]
+    # YES dips cheap early (0.35 -> 0.20) so our sub-mid YES bids fill, then
+    # climbs to 0.95 and resolves YES → bought the winner cheap → positive PnL.
+    series = [PricePoint(0, 0.35), PricePoint(60, 0.20),
+              PricePoint(120, 0.55), PricePoint(180, 0.95)]
     res = run_market(cfg, _win_market(), series)
     assert res.yes_qty > 0
     assert res.pnl > 0
