@@ -167,12 +167,24 @@ class TestDirectionalSkew:
         # Allow small drift from rounding
         assert abs(yes_size - no_size) <= max(yes_size, no_size) * 0.20
 
-    def test_filter_disabled_by_default(self):
-        # Phase-9 default: directional_filter_enabled = False
+    def test_filter_enabled_by_default_phase13(self):
+        # Phase-13: directional_filter_enabled = True
+        # At mid=0.80 (polarized > 0.70), NO Layer-A is FILTERED out.
         out = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200)
-        # NO side STILL quoted (just smaller), not skipped entirely
-        no_layer_a = [q for q in out if q.side == "NO" and q.price >= 0.15]
-        assert len(no_layer_a) > 0
+        tail_max = max(CFG.cheap_tail_levels)
+        no_layer_a = [q for q in out if q.side == "NO" and q.price > tail_max]
+        no_tail = [q for q in out if q.side == "NO" and q.price <= tail_max]
+        assert len(no_layer_a) == 0   # filtered (losing side)
+        assert len(no_tail) > 0       # cheap-tail lottery tickets KEPT
+        # Winning side (YES) Layer-A fully populated
+        assert len([q for q in out if q.side == "YES" and q.price > tail_max]) > 8
+
+    def test_filter_can_be_disabled(self):
+        cfg = replace(CFG, directional_filter_enabled=False)
+        out = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200)
+        tail_max = max(cfg.cheap_tail_levels)
+        no_layer_a = [q for q in out if q.side == "NO" and q.price > tail_max]
+        assert len(no_layer_a) > 0  # not filtered when disabled
 
 
 class TestTimingCurve:
