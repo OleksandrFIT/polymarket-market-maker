@@ -47,6 +47,22 @@ def _print_table(summaries: list[ConfigSummary]) -> None:
         print(f"{s.name:28} {s.n_markets:>4} {s.total_pnl:>12.2f} {wr:>9} {s.worst:>10.2f}")
 
 
+def sweep() -> None:
+    """Grid over entry_cutoff_frac x max_entry_price; print PnL per combo."""
+    markets = load_markets_from_db()
+    series_by_market = {m.market_id: fetch_price_series(m) for m in markets}
+    summaries: list[ConfigSummary] = []
+    for cutoff in (0.40, 0.50, 0.60, 0.75):
+        for cap in (0.50, 0.55, 0.60, 0.70):
+            cfg = replace(Config(), entry_cutoff_frac=cutoff, max_entry_price=cap)
+            summaries.append(
+                run_config(cfg, markets, series_by_market,
+                           f"cut={cutoff} cap={cap}")
+            )
+    summaries.sort(key=lambda s: s.total_pnl, reverse=True)
+    _print_table(summaries)
+
+
 def main() -> None:
     markets = load_markets_from_db()
     series_by_market = {m.market_id: fetch_price_series(m) for m in markets}
@@ -66,4 +82,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sweep() if "--sweep" in sys.argv else main()
