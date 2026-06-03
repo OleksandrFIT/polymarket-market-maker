@@ -28,4 +28,5 @@ def test_no_favorite_no_fills_no_pnl():
     series = [PricePoint(120, 0.50), PricePoint(180, 0.50)]
     res = run_market(cfg, _win_market(), series)
     assert res.yes_qty == 0
-    assert res.pnl == res.yes_qty * 1.0 - res.total_cost
+    assert res.total_cost == 0.0
+    assert res.pnl == 0.0
