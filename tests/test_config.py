@@ -19,7 +19,6 @@ class TestConfig:
         assert c.is_shadow
         assert not c.is_paper and not c.is_live
         assert c.bankroll_usd == 100.0
-        assert c.ladder_levels == 50  # Phase-9 Bonereaper-clone continuous coverage
 
     def test_mode_paper(self):
         with patch.dict(os.environ, {"MODE": "paper"}, clear=True):

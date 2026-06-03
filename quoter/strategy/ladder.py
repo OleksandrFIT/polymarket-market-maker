@@ -79,7 +79,7 @@ def _favorite_ladder(
     out: list[Quote] = []
     for i in range(cfg.favorite_ladder_levels):
         p = round(top - i * 0.01, 2)
-        if p <= 0.0 or p > cfg.max_entry_price:
+        if p <= 0.0:
             continue
         out.append(Quote(side, p, size))
     return out
@@ -97,7 +97,7 @@ def compute_ladder(
     asset: str | None = None,
     window_length_sec: float | None = None,
     velocity_short: float | None = None,
-    # Legacy kwargs accepted for caller compatibility; ignored in phase-15.
+    # committed_side and velocity_long: legacy kwargs accepted for caller compat; ignored.
     committed_side: Side | None = None,
     velocity_long: float | None = None,
 ) -> list[Quote]:
