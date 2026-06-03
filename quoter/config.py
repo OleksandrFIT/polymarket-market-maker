@@ -67,14 +67,14 @@ class Config:
     entry_start_frac: float = 0.30         # no entries before this fraction of window
     certainty_size_base: int = 5           # base shares per tick (Polymarket min)
     certainty_size_max: int = 40           # shares per tick at max certainty
-    per_market_cap_usd: float = 50.0       # base $ ceiling per market
+    per_market_cap_usd: float = 50.0       # $ ceiling on ACCUMULATED favorite spend per market (distinct from budget_per_market_usd)
     certainty_cap_multiplier: float = 2.0  # cap scales up to ×this under certainty
-    velocity_confirm_threshold: float = 0.0005  # min Binance velocity to confirm side
+    velocity_confirm_threshold: float = 0.0005  # min Binance velocity to confirm side (0.05% per lookback)
     rise_tolerance_cents: float = 0.01     # favorite may dip this much vs prev and still quote
     favorite_ladder_levels: int = 3        # one-sided bids per tick
     min_time_to_expiry_sec: float = 5.0    # below this → no quotes
 
-    # Legacy phase-14 knob, unused by phase-15; removed in cleanup task.
+    # ── Legacy phase-14 (DEPRECATED — removed in phase-15 cleanup task) ──
     entry_cutoff_frac: float = 0.50
 
     # ── Late-window aggressive stack (Phase-9 — DEPRECATED in Phase 11) ──
