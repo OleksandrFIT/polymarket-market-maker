@@ -51,7 +51,11 @@ we cannot win the thin 0.95 edge, so we enter earlier/cheaper where the spread a
 odds are better).
 
 **Decisions locked during brainstorming:**
-- **Ambition:** adapt the insight (buy favorite ~0.55–0.85), not literal 0.95 replication.
+- **Ambition:** buy the favorite across the full band **~0.55–0.95** (covering the
+  competitor's actual profit zone, where fresh data shows 77% of his money sits at
+  prices > 0.85). We do **not** chase the last-second 0.95+ thin edge literally; instead
+  the backtest **sweeps** `max_entry_price` (0.75 / 0.85 / 0.92 / 0.97) to find where the
+  edge survives **our** fill-rate, rather than assuming a band up front.
 - **Architecture:** rewrite `compute_ladder` in place (same name/signature); delete
   phase-11/12/13/14 machinery.
 - **Whipsaw protection (combination):** buy-on-rise gate + Binance momentum confirmation +
@@ -99,7 +103,7 @@ series point; `velocity_short=None`) → `fillsim` → resolution PnL.
 | Field | Default | Meaning |
 |---|---|---|
 | `favorite_min_price` | `0.55` | below this there is no clear favorite → no quotes |
-| `max_entry_price` | `0.85` | hard ceiling on any bid (raised from 0.60) |
+| `max_entry_price` | `0.95` | hard ceiling on any bid (raised from 0.60; covers the competitor's >0.85 zone — backtest-swept) |
 | `entry_start_frac` | `0.30` | no entries before this fraction of the window |
 | `dead_zone_half_width` | `0.05` | no quotes when `|mid_yes − 0.5| < this` |
 | `certainty_size_base` | `5` | base shares per tick (Polymarket min) |
@@ -165,7 +169,11 @@ function. New comparison:
 - Run the new `compute_ladder` over cached resolved markets (and an expanded sample if
   available); `prev_mid_yes` comes from the prior series point; `velocity_short=None`.
 - Compare against the **recorded live baseline −$282.53** from `state.db`.
-- Emit a report in `reports/` with a per-market table and honest caveats.
+- **Sweep `max_entry_price` over {0.75, 0.85, 0.92, 0.97}** (and optionally
+  `entry_start_frac`) to locate where the edge survives our fill model — do **not** fix the
+  price ceiling by assumption. Fresh competitor data puts 77% of his money > 0.85, so the
+  sweep must reach into that zone.
+- Emit a report in `reports/` with a per-market table, the sweep grid, and honest caveats.
 - **Invariant preserved:** the engine calls the real `compute_ladder`, not a copy.
 
 ---
@@ -197,7 +205,7 @@ No sells under any condition — hold to resolution.
 | `test_dead_zone_no_quotes` | mid≈0.5 → `[]` |
 | `test_too_early_no_quotes` | `window_frac < entry_start_frac` → `[]` |
 | `test_below_min_price_no_quotes` | favorite < 0.55 → `[]` |
-| `test_caps_at_max_entry_price` | no bid price > 0.85 |
+| `test_caps_at_max_entry_price` | no bid price > `max_entry_price` (default 0.95) |
 | `test_falling_favorite_suppressed` | mid fell vs prev → `[]` |
 | `test_velocity_disagree_blocks` | velocity against direction → `[]` |
 | `test_velocity_none_falls_back` | velocity=None → not blocked |
@@ -210,6 +218,8 @@ Delete phase-11/12/13/14 tests whose logic no longer exists.
 ### Backtest
 - New `compute_ladder` over cached markets (+ expanded sample if available).
 - Compare to recorded live baseline (−$282.53); per-market table + caveats in `reports/`.
+- **Sweep `max_entry_price` {0.75, 0.85, 0.92, 0.97}** to find where the edge survives our
+  fill model (77% of competitor money is > 0.85, so the sweep must reach that zone).
 - Invariant: engine calls the real `compute_ladder`.
 
 ---
@@ -237,10 +247,32 @@ for live capital. Paper is the real test.
 - Literal 0.95 last-second replication (fill-rate infeasible for us).
 - Live trading with real capital (separate decision after paper validation).
 
-## 9. Sources
+## 9. Conformance check vs the live earning bot (2026-06-03 fresh pull)
+
+Re-pulled 3456 fresh competitor trades to verify the spec matches the bot **currently
+making money**. Core mechanics confirmed stable:
+
+| Spec decision | Fresh data | Verdict |
+|---|---|---|
+| One side = favorite | 92% of money on favorite (>0.5) | ✅ matches |
+| Late window | 75% of money in 2nd half | ✅ matches |
+| Buy-on-rise | 93% of money on a rising price | ✅ matches |
+| Hold to resolution, no sells | 0 sells, 44 redeems | ✅ matches |
+| Size up under certainty | median $458/market, p90 $5292 | ✅ matches |
+| `max_entry_price` | 77% of his money is > 0.85 | **adjusted to 0.95 + swept** |
+| `favorite_min_price` 0.55 | 10% of money < 0.55 | deliberate (minor) |
+| `entry_start_frac` 0.30 | 9% of money < 30% of window | deliberate (minor) |
+| `per_market_cap` ~$100 | his median $458, max $6478 (uncapped) | scale-driven (our $100 bankroll) |
+| `favorite_ladder_levels` 3 | he hits ~22 distinct prices/market | tunable; default 3 (revisit if fills weak) |
+
+The one material gap (price ceiling) is resolved: `max_entry_price` raised to 0.95 and
+swept in the backtest so the price band is chosen on data, not assumption. Remaining
+deviations are deliberate and bankroll/infra-driven.
+
+## 10. Sources
 
 - Our live data: `state.db` (37 resolved markets, −$282.53).
 - Competitor real trades: `data-api.polymarket.com/activity` for
-  `0xeebde7a0e019a63e6b476eb425505b7b3e6eba30` (3447 trades, dollar-weighted analysis).
+  `0xeebde7a0e019a63e6b476eb425505b7b3e6eba30` (3447 + 3456 trades, dollar-weighted).
 - Prior reports: `reports/2026-05-28_why-minus-vs-bonereaper.md`,
   `reports/2026-05-28_backtest-baseline-vs-new.md`.
