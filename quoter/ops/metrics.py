@@ -121,7 +121,9 @@ def make_app(  # noqa: C901
                 async for row in cur:
                     meta.setdefault(row[0], (row[1], row[2], row[3], row[4]))
 
-        for mid, p in inventory.positions.items():
+        # Snapshot: the loop body awaits (DB I/O), which yields control and lets
+        # a concurrent fill/resolve mutate positions → "dict changed size". Copy first.
+        for mid, p in list(inventory.positions.items()):
             asset, tf, open_ts, expire_ts = meta.get(mid, ("?", "?", 0, 0))
             db_st = await _db_status(mid) if state is not None else None
             status = db_st or _market_status(mid, expire_ts)
