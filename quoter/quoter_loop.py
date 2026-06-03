@@ -79,6 +79,7 @@ class QuoterLoop:
         self._dirty: set[str] = set()
         self._market_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._last_requote_ts: dict[str, float] = {}
+        self._prev_mid_yes: dict[str, float] = {}
         self._tick_count = 0
 
     # ── Dynamic market lifecycle ──
@@ -212,6 +213,7 @@ class QuoterLoop:
                 self.cfg,
                 mid_yes=mid_yes,
                 time_to_expiry=tte,
+                prev_mid_yes=self._prev_mid_yes.get(market_id),
                 committed_side=committed,
                 inventory_yes_qty=yes_qty,
                 inventory_no_qty=no_qty,
@@ -220,6 +222,7 @@ class QuoterLoop:
                 velocity_short=velo_short,
                 velocity_long=velo_long,
             )
+            self._prev_mid_yes[market_id] = mid_yes
             self.exec.sync(market_id, desired)
 
             # Paper-mode: cache ask snapshot for next placement reference
