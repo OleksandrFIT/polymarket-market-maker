@@ -35,7 +35,7 @@ class Config:
     entry_start_frac: float = 0.30         # no entries before this fraction of window
     certainty_size_base: int = 5           # base shares per tick (Polymarket min)
     certainty_size_max: int = 40           # shares per tick at max certainty
-    per_market_cap_usd: float = 50.0       # $ ceiling on ACCUMULATED favorite spend per market (distinct from budget_per_market_usd)
+    per_market_cap_usd: float = 50.0       # $ ceiling on ACCUMULATED favorite spend per market
     certainty_cap_multiplier: float = 2.0  # cap scales up to ×this under certainty
     velocity_confirm_threshold: float = 0.0005  # min Binance velocity to confirm side (0.05% per lookback)
     rise_tolerance_cents: float = 0.01     # favorite may dip this much vs prev and still quote
