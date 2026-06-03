@@ -101,6 +101,8 @@ class QuoterLoop:
             self._token_to_market.pop(m.yes_token, None)
             self._token_to_market.pop(m.no_token, None)
             self._dirty.discard(market_id)
+            self._last_requote_ts.pop(market_id, None)
+            self._prev_mid_yes.pop(market_id, None)
         return m
 
     def known_tokens(self) -> list[str]:
