@@ -1,414 +1,89 @@
-"""Tests for compute_ladder pure-function strategy."""
-
-from __future__ import annotations
-
-from dataclasses import replace
+"""Tests for phase-15 one-sided late-window favorite-buying compute_ladder."""
 
 from quoter.config import Config
-from quoter.strategy.ladder import compute_ladder
+from quoter.strategy.ladder import compute_ladder, _certainty_size
 
-CFG = Config(ladder_levels=12, budget_per_market_usd=25.0, max_inventory_skew_shares=200)
-
-
-class TestLadderSanityGates:
-    def test_skip_too_close_to_expiry(self):
-        assert compute_ladder(CFG, mid_yes=0.5, time_to_expiry=3) == []
-
-    def test_skip_mid_at_edges(self):
-        assert compute_ladder(CFG, mid_yes=0.01, time_to_expiry=200) == []
-        assert compute_ladder(CFG, mid_yes=0.99, time_to_expiry=200) == []
-
-    def test_valid_mid_returns_quotes(self):
-        out = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
-        assert len(out) > 0
+# 5m window: window_frac = (300 - tte) / 300. tte=120 → frac 0.60 (late enough).
+LATE_TTE = 120.0
 
 
-class TestLadderShape:
-    def test_emits_both_sides_at_mid(self):
-        out = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
-        yes = [q for q in out if q.side == "YES"]
-        no = [q for q in out if q.side == "NO"]
-        assert len(yes) >= 8
-        assert len(no) >= 8
-
-    def test_all_prices_in_valid_range(self):
-        out = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
-        for q in out:
-            assert 0.01 <= q.price <= 0.99, f"{q!r} price out of range"
-
-    def test_all_sizes_at_least_min(self):
-        out = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
-        for q in out:
-            assert q.size >= 5, f"{q!r} below Polymarket min size"
-
-    def test_yes_quotes_below_mid_yes(self):
-        out = compute_ladder(CFG, mid_yes=0.70, time_to_expiry=200)
-        for q in out:
-            if q.side == "YES" and q.price > 0.05:
-                assert q.price < 0.70 + 0.001
-
-    def test_no_quotes_below_mid_no(self):
-        out = compute_ladder(CFG, mid_yes=0.70, time_to_expiry=200)
-        mid_no = 0.30
-        for q in out:
-            if q.side == "NO" and q.price > 0.05:
-                assert q.price < mid_no + 0.001
-
-    def test_cheap_tail_present(self):
-        out = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
-        # At least one quote at 0.01 on each side (mid - 10c > 0)
-        assert any(q.price == 0.01 and q.side == "YES" for q in out)
-        assert any(q.price == 0.01 and q.side == "NO" for q in out)
+def test_picks_higher_side_as_favorite():
+    yes = compute_ladder(Config(), mid_yes=0.70, time_to_expiry=LATE_TTE)
+    assert yes and all(q.side == "YES" for q in yes)
+    no = compute_ladder(Config(), mid_yes=0.30, time_to_expiry=LATE_TTE)
+    assert no and all(q.side == "NO" for q in no)
 
 
-class TestInventorySkew:
-    def test_long_yes_suppresses_yes_quotes(self):
-        out = compute_ladder(
-            CFG, mid_yes=0.5, time_to_expiry=200,
-            inventory_yes_qty=500, inventory_no_qty=0,
-        )
-        yes = [q for q in out if q.side == "YES"]
-        assert len(yes) == 0
-        # NO should still be quoted
-        assert any(q.side == "NO" for q in out)
-
-    def test_long_no_suppresses_no_quotes(self):
-        out = compute_ladder(
-            CFG, mid_yes=0.5, time_to_expiry=200,
-            inventory_yes_qty=0, inventory_no_qty=500,
-        )
-        no = [q for q in out if q.side == "NO"]
-        assert len(no) == 0
-        assert any(q.side == "YES" for q in out)
-
-    def test_balanced_inventory_emits_both(self):
-        out = compute_ladder(
-            CFG, mid_yes=0.5, time_to_expiry=200,
-            inventory_yes_qty=100, inventory_no_qty=100,
-        )
-        assert any(q.side == "YES" for q in out)
-        assert any(q.side == "NO" for q in out)
+def test_dead_zone_no_quotes():
+    assert compute_ladder(Config(), mid_yes=0.50, time_to_expiry=LATE_TTE) == []
+    assert compute_ladder(Config(), mid_yes=0.52, time_to_expiry=LATE_TTE) == []
 
 
-class TestLateWindowSkew:
-    """Phase-11: late window NEUTRALIZED — timing curve handles aggression."""
-
-    def test_committed_yes_still_dominates_via_directional_skew(self):
-        """Polarized mid=0.8 → YES bigger via directional_size_skew (not late stack).
-
-        Phase-14: skew is OFF by default (proved to amplify losing side); this
-        test exercises the skew BEHAVIOR, so it opts-in explicitly. tte=160s
-        keeps us before the Phase-14 entry cutoff (frac 0.50 of a 5m window),
-        and max_entry_price is lifted so the YES Layer-A near 0.80 isn't dropped
-        by the default 0.60 price-cap.
-        """
-        cfg = replace(CFG, directional_filter_enabled=True,
-                      directional_size_skew_enabled=True, max_entry_price=0.99)
-        out = compute_ladder(cfg, mid_yes=0.8, time_to_expiry=160,
-                              committed_side="YES", timeframe="5m")
-        tail_max = max(CFG.cheap_tail_levels)
-        yes_la = sum(q.size for q in out if q.side == "YES" and q.price > tail_max)
-        no_la = sum(q.size for q in out if q.side == "NO" and q.price > tail_max)
-        assert yes_la > no_la  # Layer-A YES dominates polarized
-
-    def test_no_skew_when_no_committed_side(self):
-        # Phase-14: tte=160s is before the entry cutoff (frac 0.50 of 5m window);
-        # the old tte=30s now falls past the late-stop and returns [].
-        out = compute_ladder(CFG, mid_yes=0.5, time_to_expiry=160, committed_side=None,
-                              timeframe="5m")
-        assert len(out) > 0
+def test_too_early_no_quotes():
+    # tte=290 → window_frac = (300-290)/300 = 0.033 < entry_start_frac 0.30
+    assert compute_ladder(Config(), mid_yes=0.70, time_to_expiry=290.0) == []
 
 
-class TestSelfCrossPrevention:
-    def test_drops_self_crossing_pair(self):
-        # buffer=0.01, so yes_bid + no_bid must be < 0.99
-        cfg = replace(CFG, ladder_levels=12, self_cross_buffer=0.01)
-        # If mid_yes = 0.50, mid_no = 0.50
-        # YES bid 1c below mid = 0.49; NO bid 1c below mid = 0.49
-        # Sum = 0.98 < 0.99 → OK
-        out = compute_ladder(cfg, mid_yes=0.50, time_to_expiry=200)
-        # Verify no YES+NO pair crosses
-        yes_max = max((q.price for q in out if q.side == "YES"), default=0)
-        no_max = max((q.price for q in out if q.side == "NO"), default=0)
-        assert yes_max + no_max <= 1.0 - cfg.self_cross_buffer + 1e-9
+def test_below_min_price_no_quotes():
+    # favorite price 0.53 < favorite_min_price 0.55
+    assert compute_ladder(Config(), mid_yes=0.53, time_to_expiry=LATE_TTE) == []
 
 
-class TestDirectionalSkew:
-    """Phase-11: polarized mid → BIGGER winning side Layer-A; cheap-tail
-    boosts LOSING side (polarized cheap-tail dominance)."""
-
-    def test_polarized_high_layer_a_yes_bigger(self):
-        """Layer-A YES grows when mid > 0.5 (winning side scaling).
-
-        Phase-14: opt-in to directional skew (off by default) and lift the
-        price-cap so the YES Layer-A at mid=0.80 is not dropped by the cap.
-        """
-        cfg = replace(CFG, directional_filter_enabled=True,
-                      directional_size_skew_enabled=True, max_entry_price=0.99)
-        out_neutral = compute_ladder(cfg, mid_yes=0.50, time_to_expiry=200)
-        out_high = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200)
-        tail_max = max(CFG.cheap_tail_levels)
-        # Layer-A only (exclude cheap-tail)
-        yes_neutral = sum(q.size for q in out_neutral if q.side == "YES" and q.price > tail_max)
-        yes_high = sum(q.size for q in out_high if q.side == "YES" and q.price > tail_max)
-        no_neutral = sum(q.size for q in out_neutral if q.side == "NO" and q.price > tail_max)
-        no_high = sum(q.size for q in out_high if q.side == "NO" and q.price > tail_max)
-        assert yes_high > yes_neutral  # winning side bigger
-        assert no_high < no_neutral    # losing side smaller
-
-    def test_polarized_low_layer_a_no_bigger(self):
-        # Phase-14: opt-in to skew/filter and lift the cap (NO bids at mid_no=0.80
-        # would otherwise be dropped by the default 0.60 price-cap).
-        cfg = replace(CFG, directional_filter_enabled=True,
-                      directional_size_skew_enabled=True, max_entry_price=0.99)
-        out_low = compute_ladder(cfg, mid_yes=0.20, time_to_expiry=200)
-        out_neutral = compute_ladder(cfg, mid_yes=0.50, time_to_expiry=200)
-        tail_max = max(CFG.cheap_tail_levels)
-        no_low = sum(q.size for q in out_low if q.side == "NO" and q.price > tail_max)
-        no_neutral = sum(q.size for q in out_neutral if q.side == "NO" and q.price > tail_max)
-        yes_low = sum(q.size for q in out_low if q.side == "YES" and q.price > tail_max)
-        yes_neutral = sum(q.size for q in out_neutral if q.side == "YES" and q.price > tail_max)
-        assert no_low > no_neutral
-        assert yes_low < yes_neutral
-
-    def test_polarized_cheap_tail_boost_on_losing_side(self):
-        """Phase-11: when mid > polarized threshold (0.75), cheap-tail
-        on LOSING side (NO) gets bigger sizing (Bonereaper pattern)."""
-        out = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=200)
-        tail_max = max(CFG.cheap_tail_levels)
-        cheap_no = sum(q.size for q in out if q.side == "NO" and q.price <= tail_max)
-        cheap_yes = sum(q.size for q in out if q.side == "YES" and q.price <= tail_max)
-        # NO cheap-tail boosted (losing side gets the lottery tickets)
-        assert cheap_no > cheap_yes
-
-    def test_neutral_mid_keeps_sides_symmetric(self):
-        out = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
-        yes_size = sum(q.size for q in out if q.side == "YES")
-        no_size = sum(q.size for q in out if q.side == "NO")
-        # Allow small drift from rounding
-        assert abs(yes_size - no_size) <= max(yes_size, no_size) * 0.20
-
-    def test_filter_disabled_by_default_phase14(self):
-        # Phase-14: directional_filter_enabled = False by default (it loaded the
-        # losing side and lost money). At mid=0.80 the losing side (NO) Layer-A is
-        # therefore NOT filtered — both sides keep their near-mid bids.
-        # max_entry_price lifted so the price-cap doesn't confound the filter check.
-        cfg = replace(CFG, max_entry_price=0.99)
-        out = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200)
-        tail_max = max(CFG.cheap_tail_levels)
-        no_layer_a = [q for q in out if q.side == "NO" and q.price > tail_max]
-        yes_layer_a = [q for q in out if q.side == "YES" and q.price > tail_max]
-        assert len(no_layer_a) > 0    # NOT filtered (default filter is OFF)
-        assert len(yes_layer_a) > 8   # winning side Layer-A also populated
-
-    def test_filter_can_be_disabled(self):
-        cfg = replace(CFG, directional_filter_enabled=False)
-        out = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200)
-        tail_max = max(cfg.cheap_tail_levels)
-        no_layer_a = [q for q in out if q.side == "NO" and q.price > tail_max]
-        assert len(no_layer_a) > 0  # not filtered when disabled
+def test_caps_at_max_entry_price():
+    q = compute_ladder(Config(), mid_yes=0.96, time_to_expiry=LATE_TTE)
+    assert q and max(x.price for x in q) <= Config().max_entry_price
 
 
-class TestTimingCurve:
-    """Phase-11: front-loaded — early window 3×, late window 0.1×."""
-
-    def test_5m_window_open_is_aggressive(self):
-        """At window open (tte ~= 300s for 5m), Layer-A size > base mid."""
-        early = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=290, timeframe="5m")
-        mid_window = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=150, timeframe="5m")
-        tail_max = max(CFG.cheap_tail_levels)
-        early_total = sum(q.size for q in early if q.price > tail_max)
-        mid_total = sum(q.size for q in mid_window if q.price > tail_max)
-        # 3× multiplier at open, 1× at mid → early should be ~3× bigger
-        assert early_total > mid_total * 2
-
-    def test_5m_window_close_backs_off(self):
-        """At last 30s of 5m, size collapses to ~0.1× of mid."""
-        mid_window = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=150, timeframe="5m")
-        late = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=10, timeframe="5m")
-        tail_max = max(CFG.cheap_tail_levels)
-        mid_total = sum(q.size for q in mid_window if q.price > tail_max)
-        late_total = sum(q.size for q in late if q.price > tail_max)
-        # Late should be MUCH smaller than mid (0.1× vs 1.0×)
-        assert late_total < mid_total
-
-    def test_15m_uses_different_curve(self):
-        """15m and 5m pick different timing-curve buckets at the same fraction.
-
-        Phase-14: the old tte values (10s/50s) now fall PAST the entry cutoff
-        (frac 0.50) and return []. Use the latest pre-cutoff fraction (0.50) for
-        each window: tte=150s for 5m (BASE bucket) and tte=450s for 15m (VALLEY
-        bucket). The curves differ at that fraction, so per-quote sizing differs
-        even though both still emit quotes.
-        """
-        late_5m = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=150, timeframe="5m")
-        late_15m = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=450, timeframe="15m")
-        # Both emit quotes at frac 0.50 (before the cutoff) ...
-        assert len(late_5m) > 0 and len(late_15m) > 0
-        tail_max = max(CFG.cheap_tail_levels)
-        total_5m = sum(q.size for q in late_5m if q.price > tail_max)
-        total_15m = sum(q.size for q in late_15m if q.price > tail_max)
-        # ... but the per-timeframe curves differ at the same fraction (5m BASE
-        # 1.0× vs 15m VALLEY 0.3×) → different Layer-A totals.
-        assert total_5m != total_15m
+def test_falling_favorite_suppressed():
+    # YES favorite price fell 0.75 → 0.70 (drop 0.05 > rise_tolerance 0.01)
+    out = compute_ladder(Config(), mid_yes=0.70, time_to_expiry=LATE_TTE, prev_mid_yes=0.75)
+    assert out == []
 
 
-class TestVelocityGate:
-    """Phase-12: directional skew GATED by Binance velocity.
-
-    Note: at polarized mid (0.80) the Layer-A YES has many more LEVELS than
-    Layer-A NO regardless of skew (mid_no=0.20 ⇒ only 9 NO levels possible
-    vs 50 for YES). So we compare WITH-velocity vs OPPOSED-velocity to test
-    the gating effect on PER-QUOTE multiplier.
-    """
-
-    def _yes_total_la(self, out):
-        tail_max = max(CFG.cheap_tail_levels)
-        return sum(q.size for q in out if q.side == "YES" and q.price > tail_max)
-
-    def test_velocity_agrees_amplifies_yes_vs_velocity_opposes(self):
-        """At mid=0.80: velocity UP → bigger YES; velocity DOWN → smaller YES.
-
-        Phase-14: opt-in to skew (off by default) and lift the price-cap so the
-        YES Layer-A near 0.80 isn't dropped by the default 0.60 cap.
-        """
-        cfg = replace(CFG, directional_size_skew_enabled=True, max_entry_price=0.99)
-        agree = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200,
-                                timeframe="5m", asset="ETH",  # no conviction
-                                velocity_short=0.003)
-        oppose = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200,
-                                  timeframe="5m", asset="ETH",
-                                  velocity_short=-0.003)
-        yes_agree = self._yes_total_la(agree)
-        yes_oppose = self._yes_total_la(oppose)
-        # When velocity opposes, skew killed → smaller YES total
-        assert yes_agree > yes_oppose
-
-    def test_velocity_neutral_keeps_skew(self):
-        """Tiny velocity (below neutral threshold) → behaves like velocity_short=None."""
-        neutral = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200,
-                                   timeframe="5m", asset="ETH",
-                                   velocity_short=0.0001)
-        no_velo = compute_ladder(CFG, mid_yes=0.80, time_to_expiry=200,
-                                   timeframe="5m", asset="ETH",
-                                   velocity_short=None)
-        # Roughly equivalent
-        assert abs(self._yes_total_la(neutral) - self._yes_total_la(no_velo)) <= 10
-
-    def test_no_velocity_equivalent_to_skew_on(self):
-        """velocity_short=None → skew applied (backward compat).
-
-        Phase-14: opt-in to skew and lift the price-cap (see sibling test).
-        """
-        cfg = replace(CFG, directional_size_skew_enabled=True, max_entry_price=0.99)
-        no_velo = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200,
-                                   timeframe="5m", asset="ETH",
-                                   velocity_short=None)
-        oppose = compute_ladder(cfg, mid_yes=0.80, time_to_expiry=200,
-                                  timeframe="5m", asset="ETH",
-                                  velocity_short=-0.003)
-        # No velocity → skew applied → bigger than oppose case
-        assert self._yes_total_la(no_velo) > self._yes_total_la(oppose)
+def test_rising_favorite_allowed():
+    # YES favorite price rose 0.65 → 0.70 → quotes
+    out = compute_ladder(Config(), mid_yes=0.70, time_to_expiry=LATE_TTE, prev_mid_yes=0.65)
+    assert out
 
 
-class TestVelocityConviction:
-    """Phase-12: conviction trigger requires velocity confirmation."""
-
-    def test_conviction_triggers_when_btc_extreme_mid_and_velocity_agrees(self):
-        # BTC + extreme mid + velocity UP → conviction
-        out_conv = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=200,
-                                    timeframe="5m", asset="BTC",
-                                    velocity_long=0.003)
-        # Same setup but no velocity confirm → backward-compat: still conviction
-        out_no_velo = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=200,
-                                       timeframe="5m", asset="BTC",
-                                       velocity_long=None)
-        tail_max = max(CFG.cheap_tail_levels)
-        sz_conv = sum(q.size for q in out_conv if q.price > tail_max)
-        sz_nv = sum(q.size for q in out_no_velo if q.price > tail_max)
-        # Both should be big (conviction); both ≈ same
-        assert sz_conv > 0 and sz_nv > 0
-
-    def test_conviction_killed_when_velocity_opposes_mid(self):
-        """BTC + extreme mid BUT velocity OPPOSES → NO conviction."""
-        # mid=0.85 says YES, but BTC moving DOWN → suppress conviction
-        out_no_conv = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=200,
-                                       timeframe="5m", asset="BTC",
-                                       velocity_long=-0.003)
-        out_with_conv = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=200,
-                                         timeframe="5m", asset="BTC",
-                                         velocity_long=0.003)
-        tail_max = max(CFG.cheap_tail_levels)
-        sz_no = sum(q.size for q in out_no_conv if q.price > tail_max)
-        sz_yes = sum(q.size for q in out_with_conv if q.price > tail_max)
-        # Without conviction → smaller budget → smaller total size
-        assert sz_yes > sz_no
+def test_velocity_disagree_blocks():
+    # YES favorite but BTC velocity negative (down) → blocked
+    out = compute_ladder(Config(), mid_yes=0.70, time_to_expiry=LATE_TTE, velocity_short=-0.01)
+    assert out == []
 
 
-class TestConviction:
-    """Phase-11: conviction triggers multiply budget."""
-
-    def test_conviction_15m_early_doubles_size(self):
-        """Early entry on 15m = conviction → budget × multiplier."""
-        # Normal: 5m at mid-window
-        normal = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=150,
-                                timeframe="5m", asset="ETH")
-        # Conviction: 15m within first 30s of window
-        conv = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=880,
-                              timeframe="15m", asset="BTC")
-        tail_max = max(CFG.cheap_tail_levels)
-        normal_total = sum(q.size for q in normal if q.price > tail_max)
-        conv_total = sum(q.size for q in conv if q.price > tail_max)
-        # Conviction should be at least 2× bigger
-        assert conv_total > normal_total * 2
-
-    def test_conviction_btc_extreme_mid_triggers(self):
-        """BTC at mid=0.85 (extreme) → conviction multiplier applied."""
-        eth_extreme = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=150,
-                                      timeframe="5m", asset="ETH")
-        btc_extreme = compute_ladder(CFG, mid_yes=0.85, time_to_expiry=150,
-                                      timeframe="5m", asset="BTC")
-        tail_max = max(CFG.cheap_tail_levels)
-        eth_total = sum(q.size for q in eth_extreme if q.price > tail_max)
-        btc_total = sum(q.size for q in btc_extreme if q.price > tail_max)
-        # BTC gets conviction multiplier, ETH doesn't (not in conviction_assets)
-        assert btc_total > eth_total
+def test_velocity_agree_allowed():
+    out = compute_ladder(Config(), mid_yes=0.70, time_to_expiry=LATE_TTE, velocity_short=0.01)
+    assert out
 
 
-class TestSizing:
-    def test_tight_cluster_quotes_are_larger_than_mid_depth(self):
-        """Phase-9: top N levels (tight cluster) > deeper levels."""
-        out = compute_ladder(CFG, mid_yes=0.50, time_to_expiry=200)
-        yes = sorted([q for q in out if q.side == "YES"], key=lambda q: -q.price)
-        if len(yes) >= 10:
-            cluster_avg = sum(q.size for q in yes[:3]) / 3
-            mid_depth_avg = sum(q.size for q in yes[5:8]) / 3
-            assert cluster_avg >= mid_depth_avg  # cluster boosted
+def test_velocity_none_falls_back():
+    out = compute_ladder(Config(), mid_yes=0.70, time_to_expiry=LATE_TTE, velocity_short=None)
+    assert out  # not blocked when velocity unavailable (backtest)
 
 
-class TestEntryCutoff:
-    def test_no_quotes_after_cutoff(self):
-        cfg = replace(CFG, entry_cutoff_frac=0.50)
-        # 5m window = 300s. At tte=60s we are 240/300 = 80% in → past cutoff.
-        out = compute_ladder(cfg, mid_yes=0.50, time_to_expiry=60,
-                             timeframe="5m")
-        assert out == []
-
-    def test_quotes_before_cutoff(self):
-        cfg = replace(CFG, entry_cutoff_frac=0.50)
-        # tte=240s → 60/300 = 20% in → before cutoff.
-        out = compute_ladder(cfg, mid_yes=0.50, time_to_expiry=240,
-                             timeframe="5m")
-        assert len(out) > 0
+def test_certainty_size_monotonic():
+    cfg = Config()
+    low = _certainty_size(0.60, 0.40, cfg)
+    high = _certainty_size(0.90, 0.95, cfg)
+    assert high > low
 
 
-class TestPriceCap:
-    def test_no_quote_above_cap(self):
-        cfg = replace(CFG, max_entry_price=0.60)
-        # mid_yes=0.85 → YES bids near 0.84, 0.83... must all be dropped;
-        # NO bids near 0.14 survive.
-        out = compute_ladder(cfg, mid_yes=0.85, time_to_expiry=240,
-                             timeframe="5m")
-        assert out, "expected some (cheap NO) quotes"
-        assert all(q.price <= 0.60 for q in out), \
-            f"quote above cap: {[q for q in out if q.price > 0.60]}"
+def test_per_market_cap_stops_adds():
+    # large existing favorite inventory → spent proxy exceeds cap → []
+    out = compute_ladder(Config(), mid_yes=0.70, time_to_expiry=LATE_TTE,
+                         inventory_yes_qty=1000)
+    assert out == []
+
+
+def test_only_favorite_side():
+    out = compute_ladder(Config(), mid_yes=0.80, time_to_expiry=LATE_TTE)
+    assert out and len({q.side for q in out}) == 1
+
+
+def test_legacy_kwargs_accepted():
+    # quoter_loop still passes committed_side / velocity_long; must not error.
+    out = compute_ladder(Config(), mid_yes=0.70, time_to_expiry=LATE_TTE,
+                         committed_side="YES", velocity_long=0.0, timeframe="5m",
+                         asset="BTC")
+    assert out
