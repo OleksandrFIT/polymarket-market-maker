@@ -23,7 +23,7 @@ class Config:
 
     # ── Markets ──
     assets: tuple[str, ...] = ("BTC", "ETH")
-    timeframes: tuple[str, ...] = ("5m", "15m")
+    timeframes: tuple[str, ...] = ("5m",)  # 15m disabled: paper showed -$30 vs +$39 on 5m
 
     # ── Phase-15 late-window favorite-buying ──
     # Strategy follows the Polymarket price: late in the window the mid has
