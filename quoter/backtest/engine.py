@@ -15,6 +15,7 @@ def run_market(
     yes_qty = no_qty = 0.0
     total_cost = 0.0
     n_fills = 0
+    prev_yes: float | None = None
 
     for i in range(len(series) - 1):
         now, nxt = series[i], series[i + 1]
@@ -25,6 +26,7 @@ def run_market(
             cfg,
             mid_yes=now.yes_price,
             time_to_expiry=float(tte),
+            prev_mid_yes=prev_yes,
             timeframe=window.timeframe,
             asset=window.asset,
             window_length_sec=float(window.window_length),
@@ -38,6 +40,7 @@ def run_market(
                 no_qty += size
             total_cost += price * size
             n_fills += 1
+        prev_yes = now.yes_price
 
     win_shares = yes_qty if window.winning_side == "YES" else no_qty
     pnl = win_shares * 1.0 - total_cost

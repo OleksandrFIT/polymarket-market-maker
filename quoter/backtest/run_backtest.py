@@ -47,18 +47,19 @@ def _print_table(summaries: list[ConfigSummary]) -> None:
         print(f"{s.name:28} {s.n_markets:>4} {s.total_pnl:>12.2f} {wr:>9} {s.worst:>10.2f}")
 
 
+RECORDED_LIVE_BASELINE = -282.53  # from state.db: 37 resolved markets, 8W/29L
+
+
 def sweep() -> None:
-    """Grid over entry_cutoff_frac x max_entry_price; print PnL per combo."""
+    """Grid over max_entry_price; print PnL per ceiling (price band chosen on data)."""
     markets = load_markets_from_db()
     series_by_market = {m.market_id: fetch_price_series(m) for m in markets}
     summaries: list[ConfigSummary] = []
-    for cutoff in (0.40, 0.50, 0.60, 0.75):
-        for cap in (0.50, 0.55, 0.60, 0.70):
-            cfg = replace(Config(), entry_cutoff_frac=cutoff, max_entry_price=cap)
-            summaries.append(
-                run_config(cfg, markets, series_by_market,
-                           f"cut={cutoff} cap={cap}")
-            )
+    for cap in (0.75, 0.85, 0.92, 0.97):
+        cfg = replace(Config(), max_entry_price=cap)
+        summaries.append(
+            run_config(cfg, markets, series_by_market, f"cap={cap}")
+        )
     summaries.sort(key=lambda s: s.total_pnl, reverse=True)
     _print_table(summaries)
 
@@ -66,19 +67,11 @@ def sweep() -> None:
 def main() -> None:
     markets = load_markets_from_db()
     series_by_market = {m.market_id: fetch_price_series(m) for m in markets}
-
-    baseline = replace(
-        Config(), directional_filter_enabled=True,
-        directional_size_skew_enabled=True, entry_cutoff_frac=1.0,
-        max_entry_price=0.99,
-    )
-    new_tactic = Config()  # phase-14 defaults
-
-    summaries = [
-        run_config(baseline, markets, series_by_market, "baseline(phase-13)"),
-        run_config(new_tactic, markets, series_by_market, "new(early+cap)"),
-    ]
-    _print_table(summaries)
+    phase15 = run_config(Config(), markets, series_by_market, "phase-15(late-fav)")
+    _print_table([phase15])
+    print(f"\nRecorded live baseline (state.db): {RECORDED_LIVE_BASELINE:.2f}")
+    delta = phase15.total_pnl - RECORDED_LIVE_BASELINE
+    print(f"Delta vs live baseline: {delta:+.2f}")
 
 
 if __name__ == "__main__":
