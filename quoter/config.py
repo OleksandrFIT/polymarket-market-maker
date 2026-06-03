@@ -57,12 +57,25 @@ class Config:
     directional_size_skew_enabled: bool = False  # Phase-14: off (amplified losing side)
     directional_skew_coef: float = 2.0
 
-    # ── Phase-14 entry discipline (Bonereaper-style early-entry + price-cap) ──
-    # Data (2026-05-28): -$208 of -$247 loss came from fills after 66% of the
-    # window; -$162 from fills above price 0.60 (chasing the favorite into
-    # whipsaw). Stop adding inventory late, and never bid above max_entry_price.
-    entry_cutoff_frac: float = 0.50   # no new quotes after this fraction of window
-    max_entry_price: float = 0.60     # drop any quote priced above this
+    # ── Phase-15 late-window favorite-buying ──
+    # Strategy follows the Polymarket price: late in the window the mid has
+    # converged toward the outcome, so we BUY the favorite (the side priced
+    # > 0.5), one side only, scaling size with certainty, never adding to a
+    # falling side. Buy-only, held to resolution.
+    favorite_min_price: float = 0.55       # below this no clear favorite → no quotes
+    max_entry_price: float = 0.95          # hard ceiling on any bid (backtest-swept)
+    entry_start_frac: float = 0.30         # no entries before this fraction of window
+    certainty_size_base: int = 5           # base shares per tick (Polymarket min)
+    certainty_size_max: int = 40           # shares per tick at max certainty
+    per_market_cap_usd: float = 50.0       # base $ ceiling per market
+    certainty_cap_multiplier: float = 2.0  # cap scales up to ×this under certainty
+    velocity_confirm_threshold: float = 0.0005  # min Binance velocity to confirm side
+    rise_tolerance_cents: float = 0.01     # favorite may dip this much vs prev and still quote
+    favorite_ladder_levels: int = 3        # one-sided bids per tick
+    min_time_to_expiry_sec: float = 5.0    # below this → no quotes
+
+    # Legacy phase-14 knob, unused by phase-15; removed in cleanup task.
+    entry_cutoff_frac: float = 0.50
 
     # ── Late-window aggressive stack (Phase-9 — DEPRECATED in Phase 11) ──
     # Phase 9 thought Bonereaper does ×3 in last 30s. Data showed OPPOSITE:

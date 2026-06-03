@@ -51,13 +51,19 @@ class TestConfig:
         with pytest.raises(FrozenInstanceError):
             c.bankroll_usd = 999  # type: ignore[misc]
 
-    def test_new_tactic_defaults(self):
+    def test_phase15_defaults(self):
         c = Config()
-        assert c.entry_cutoff_frac == 0.50
-        assert c.max_entry_price == 0.60
-        # chase-the-favorite layers OFF by default (proven to hurt)
-        assert c.directional_filter_enabled is False
-        assert c.directional_size_skew_enabled is False
+        assert c.favorite_min_price == 0.55
+        assert c.max_entry_price == 0.95
+        assert c.entry_start_frac == 0.30
+        assert c.certainty_size_base == 5
+        assert c.certainty_size_max == 40
+        assert c.per_market_cap_usd == 50.0
+        assert c.certainty_cap_multiplier == 2.0
+        assert c.velocity_confirm_threshold == 0.0005
+        assert c.rise_tolerance_cents == 0.01
+        assert c.favorite_ladder_levels == 3
+        assert c.min_time_to_expiry_sec == 5.0
 
 
 class TestPolyCreds:
