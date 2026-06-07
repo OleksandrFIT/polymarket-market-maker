@@ -10,6 +10,7 @@ from quoter.markets import Market
 from quoter.quoter_loop import QuoterLoop
 from quoter.risk.caps import RiskGuard
 from quoter.strategy.inventory import Inventory
+from quoter.ops.live_settings import LiveSettings
 
 
 def _market(mid: str) -> Market:
@@ -60,3 +61,22 @@ class TestPerMarketRiskGate:
         assert "M1" in ex.cancelled       # quotes pulled for the over-cap market
         assert "M1" not in ex.synced      # but no new ladder posted
         assert not risk.stopped           # bot NOT globally halted
+
+
+class TestLiveSettingsOverlay:
+    def test_live_settings_overlay_applies(self):
+        """LiveSettings.update mutates the overlay; dataclasses.replace applies it
+        to a fresh eff_cfg without touching the frozen base Config."""
+        inv = Inventory()
+        risk = RiskGuard(replace(Config(mode="paper"), max_market_position_usd=50.0), inv)
+        ex = _RecordingExecutor()
+        loop = _loop(inv, risk, ex)
+
+        # Sanity: base value must differ from 15 so the test is meaningful.
+        assert loop.cfg.per_market_cap_usd != 15.0
+
+        loop.live.update("per_market_cap_usd", 15)
+        eff = replace(loop.cfg, **loop.live.snapshot())
+
+        assert eff.per_market_cap_usd == 15.0
+        assert loop.cfg.per_market_cap_usd != 15.0  # base config must remain unchanged

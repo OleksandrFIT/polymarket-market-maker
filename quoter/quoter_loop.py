@@ -20,12 +20,14 @@ import asyncio
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Protocol
 
 from quoter.book.book_manager import BookManager
 from quoter.config import Config
 from quoter.execution.paper_executor import PaperExecutor
 from quoter.markets import Market
+from quoter.ops.live_settings import LiveSettings
 from quoter.ops.logger import get_logger
 from quoter.risk.caps import RiskGuard
 from quoter.strategy.inventory import Inventory
@@ -59,6 +61,7 @@ class QuoterLoop:
         get_binance_price: Callable[[str], float | None],
         on_fill: Callable[[str, str, float, int], Awaitable[None]] | None = None,
         get_binance_velocity: Callable[[str, float], float | None] | None = None,
+        live: LiveSettings | None = None,
     ) -> None:
         self.cfg = cfg
         self.markets = {m.market_id: m for m in markets}
@@ -69,6 +72,7 @@ class QuoterLoop:
         self.get_binance = get_binance_price
         self.get_binance_velocity = get_binance_velocity
         self._on_fill = on_fill
+        self.live = live if live is not None else LiveSettings(cfg)
 
         # Reverse map token_id → market_id
         self._token_to_market: dict[str, str] = {}
@@ -211,8 +215,9 @@ class QuoterLoop:
                     market.asset, self.cfg.velocity_long_lookback_sec,
                 )
 
+            eff_cfg = replace(self.cfg, **self.live.snapshot())
             desired = compute_ladder(
-                self.cfg,
+                eff_cfg,
                 mid_yes=mid_yes,
                 time_to_expiry=tte,
                 prev_mid_yes=self._prev_mid_yes.get(market_id),

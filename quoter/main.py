@@ -37,6 +37,7 @@ from quoter.feeds.poly_market_ws import PolyMarketWS  # noqa: E402
 from quoter.feeds.poly_user_ws import PolyUserWS  # noqa: E402
 from quoter.lifecycle.market_lifecycle import MarketLifecycle  # noqa: E402
 from quoter.markets import Market, discover_markets  # noqa: E402
+from quoter.ops.live_settings import LiveSettings  # noqa: E402
 from quoter.ops.logger import get_logger, setup_logging  # noqa: E402
 from quoter.ops.metrics import make_app, serve_forever  # noqa: E402
 from quoter.persistence.state import State  # noqa: E402
@@ -186,12 +187,15 @@ async def _amain() -> None:  # noqa: C901  (entry-point orchestration, hard to s
     if isinstance(executor, LiveExecutor):
         executor.set_fill_callback(live_fill_handler)
 
+    live_settings = LiveSettings(cfg, path="settings.json")
+    live_settings.load()
     quoter = QuoterLoop(
         cfg=cfg, markets=markets, book_manager=book_manager,
         executor=executor, inventory=inventory, risk=risk,
         get_binance_price=binance_latest.get,
         on_fill=persist_fill,
         get_binance_velocity=price_buf.velocity,
+        live=live_settings,
     )
     # Subscribe listener for any token added later via MarketLifecycle.
     # We subscribe per-token on first event arrival lazily — the listener
