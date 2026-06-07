@@ -212,3 +212,10 @@ class TestSettingsEndpoint:
             r2 = await client.post("/api/settings", json={"key": "nope", "value": 1})
             assert r2.status == 400
             assert (await client.get("/api/settings")).status == 200
+
+    async def test_post_settings_missing_fields_400(self):
+        quoter = _quoter([])
+        app = _build_app(quoter)
+        async with TestClient(TestServer(app)) as client:
+            r = await client.post("/api/settings", json={})
+            assert r.status == 400

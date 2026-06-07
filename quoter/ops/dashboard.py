@@ -676,29 +676,35 @@ const SETTING_KEYS = [
   "velocity_confirm_threshold","min_time_to_expiry_sec"
 ];
 async function loadSettings() {
-  const r = await fetch("/api/settings");
-  const s = await r.json();
-  const box = document.getElementById("settings-fields");
-  box.innerHTML = "";
-  for (const k of SETTING_KEYS) {
-    const wrap = document.createElement("div");
-    wrap.style.cssText = "display:flex;flex-direction:column;gap:2px;";
-    wrap.innerHTML = `<label class="muted" style="font-size:11px;">${k}</label>`;
-    const inp = document.createElement("input");
-    inp.type = "number"; inp.step = "any"; inp.id = "set-" + k; inp.value = s[k];
-    inp.style.width = "120px";
-    const btn = document.createElement("button");
-    btn.className = "fbtn"; btn.textContent = "Apply";
-    btn.onclick = () => setSetting(k);
-    const rowEl = document.createElement("div");
-    rowEl.style.cssText = "display:flex;gap:4px;";
-    rowEl.appendChild(inp); rowEl.appendChild(btn);
-    wrap.appendChild(rowEl); box.appendChild(wrap);
+  try {
+    const r = await fetch("/api/settings");
+    const s = await r.json();
+    const box = document.getElementById("settings-fields");
+    box.innerHTML = "";
+    for (const k of SETTING_KEYS) {
+      const wrap = document.createElement("div");
+      wrap.style.cssText = "display:flex;flex-direction:column;gap:2px;";
+      wrap.innerHTML = `<label class="muted" style="font-size:11px;">${k}</label>`;
+      const inp = document.createElement("input");
+      inp.type = "number"; inp.step = "any"; inp.id = "set-" + k; inp.value = s[k];
+      inp.style.width = "120px";
+      const btn = document.createElement("button");
+      btn.className = "fbtn"; btn.textContent = "Apply";
+      btn.onclick = () => setSetting(k);
+      const rowEl = document.createElement("div");
+      rowEl.style.cssText = "display:flex;gap:4px;";
+      rowEl.appendChild(inp); rowEl.appendChild(btn);
+      wrap.appendChild(rowEl); box.appendChild(wrap);
+    }
+  } catch (e) {
+    document.getElementById("settings-status").textContent = "⚠ Could not load settings";
+    console.error(e);
   }
 }
 async function setSetting(key) {
   const val = document.getElementById("set-" + key).value;
   const st = document.getElementById("settings-status");
+  if (val === "" || isNaN(parseFloat(val))) { st.textContent = "❌ enter a number"; st.style.color = "#e66"; return; }
   const r = await fetch("/api/settings", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({key, value: parseFloat(val)})
