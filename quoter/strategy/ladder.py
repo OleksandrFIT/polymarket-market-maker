@@ -1,12 +1,13 @@
-"""Phase-15 strategy: one-sided late-window favorite-buying.
+"""Phase-16 strategy: commit-to-one-side late-window favorite-buying with flat size.
 
-We follow the Polymarket price. Late in the window the mid has converged toward
-the actual outcome, so we BUY the side already pricing as the winner (the
-favorite), one side only, scaling size as certainty rises, and never adding to a
-falling side (anti-knife). Buy-only; positions are held to resolution (no sells).
+We follow the Polymarket price. Late in the window (last 40%) the mid has
+converged toward the actual outcome, so we BUY the near-certain favorite
+(price >= favorite_min_price), committing to one side only for the window.
+Size is flat (cfg.flat_size shares per tick — no certainty ramp).
+Never adding to a falling side (anti-knife). Buy-only; positions held to resolution.
 
 Pure function: compute_ladder(cfg, mid_yes, time_to_expiry, ...) -> list[Quote].
-All state (the previous mid, for the buy-on-rise gate) is passed in by the caller.
+All state (the previous mid, inventory) is passed in by the caller.
 """
 
 from __future__ import annotations
@@ -60,12 +61,6 @@ def _certainty(price: float, window_frac: float, cfg: Config) -> float:
     return pc * tc
 
 
-def _certainty_size(price: float, window_frac: float, cfg: Config) -> int:
-    """Per-tick share size, scaling base..max with certainty."""
-    c = _certainty(price, window_frac, cfg)
-    span = cfg.certainty_size_max - cfg.certainty_size_base
-    return cfg.certainty_size_base + int(round(c * span))
-
 
 def _favorite_ladder(
     side: Side, fav_price: float, size: int, cfg: Config,
@@ -102,7 +97,7 @@ def compute_ladder(
     velocity_long: float | None = None,
 ) -> list[Quote]:
     """Return one-sided favorite BUY bids. See module docstring for the rules."""
-    if not (0.02 <= mid_yes <= 0.98) or time_to_expiry < cfg.min_time_to_expiry_sec:
+    if not (0.02 <= mid_yes <= 0.99) or time_to_expiry < cfg.min_time_to_expiry_sec:
         return []
 
     if window_length_sec is None:
@@ -115,6 +110,13 @@ def compute_ladder(
     side = _pick_favorite_side(mid_yes, velocity_short, cfg)
     if side is None:
         return []
+
+    # Phase-16 commit-to-one-side: once we hold a side this window, only quote it.
+    if inventory_yes_qty > 0 and side == "NO":
+        return []
+    if inventory_no_qty > 0 and side == "YES":
+        return []
+
     fav_price = mid_yes if side == "YES" else (1.0 - mid_yes)
     if fav_price < cfg.favorite_min_price:
         return []
@@ -133,5 +135,5 @@ def compute_ladder(
     if fav_qty * fav_price >= cap_usd:
         return []
 
-    size = _certainty_size(fav_price, window_frac, cfg)
+    size = cfg.flat_size
     return _favorite_ladder(side, fav_price, size, cfg)

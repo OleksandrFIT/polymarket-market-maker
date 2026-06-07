@@ -25,10 +25,11 @@ class Config:
     assets: tuple[str, ...] = ("BTC", "ETH")
     timeframes: tuple[str, ...] = ("5m",)  # 15m disabled: paper showed -$30 vs +$39 on 5m
 
-    # ── Phase-15 late-window favorite-buying ──
-    # Strategy follows the Polymarket price: late in the window the mid has
-    # converged toward the outcome, so we BUY the favorite (the side priced
-    # > 0.5), one side only, scaling size with certainty, never adding to a
+    # ── Phase-16 late-window favorite-buying (commit-to-one-side, flat size) ──
+    # Strategy follows the Polymarket price: only in the last 40% of the window
+    # (entry_start_frac) and only when the near-certain favorite (>= favorite_min_price)
+    # is found. We BUY that side with flat_size shares per tick (no certainty ramp),
+    # commit to one side for the window (no cross-side adds), and never add to a
     # falling side. Buy-only, held to resolution.
     favorite_min_price: float = 0.85       # phase-16: only near-certain favorites
     max_entry_price: float = 0.97          # phase-16: allow >=0.95 like competitor
