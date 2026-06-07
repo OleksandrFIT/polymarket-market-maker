@@ -63,10 +63,21 @@ both tighter price floor and later entry reduce losses in this backtest.
 
 ## Caveats
 
-1. **Coarse fill model.** `fillsim` assumes a fill whenever the bid is touched
-   by the next price point; it does not model queue depth, taker arrival rate,
-   or our 110 ms Slovakia→us-east-1 latency. Live fill rate will be lower,
-   especially for the tighter configs where there are fewer touches.
+1. **Coarse fill model — and it is DIRECTIONALLY BIASED AGAINST this strategy.**
+   `fillsim` fills a BUY whenever the side's price dips to/below the bid. For
+   high-price favorite-buying this is structurally pessimistic: when a favorite
+   **crashes** (loses), the price craters down through ALL 3 ladder bids
+   (e.g. 0.90→0.70 fills bids at 0.90/0.89/0.88 → 30 shares at ~0.89 → max
+   loss); when a favorite **rises** (wins), the price moves UP and only the top
+   bid fills (e.g. 0.86→0.90 fills 1 bid → 10 shares at 0.86 → small gain). So
+   losers over-fill 3× at near-ceiling prices while winners under-fill 1× at the
+   floor. In live, a crashing token has heavy sell pressure and our back-of-queue
+   maker bids would fill 0–1 levels, not all 3. **Conclusion: the −$316 figure is
+   likely WORSE than live, not better** — the backtest is conservative for this
+   tactic. It does not flip the sign to positive, but the true live number on the
+   same sample is plausibly closer to flat/mildly-negative, especially for the
+   tighter cells (fmin=0.90/estart=0.70 at −$133). This is exactly why **paper
+   (and ultimately co-located live) is the real test, not this backtest.**
 
 2. **Per-market cap not modelled correctly.** The backtest passes plain
    `int(yes_qty)` but does not account for accumulated USD cost precisely the
