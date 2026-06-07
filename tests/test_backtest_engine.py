@@ -12,11 +12,10 @@ def _win_market():
 
 def test_buying_winning_favorite_is_profitable():
     cfg = Config()
-    # Late, rising YES favorite (0.70 → 0.96) that resolves YES. Our top bid
-    # sits at the favorite price each interval, so YES fills cheap-of-1.0 and
-    # the winning shares pay out 1.0 → positive PnL.
-    series = [PricePoint(120, 0.70), PricePoint(180, 0.80),
-              PricePoint(240, 0.90), PricePoint(290, 0.96)]
+    # Late, rising YES favorite in the >=0.85 band during the last 40% of a 5m
+    # window (open=0, expire=300): times 200,240,280,295 → window_frac 0.67..0.98.
+    series = [PricePoint(200, 0.86), PricePoint(240, 0.90),
+              PricePoint(280, 0.95), PricePoint(295, 0.99)]
     res = run_market(cfg, _win_market(), series)
     assert res.yes_qty > 0
     assert res.pnl > 0

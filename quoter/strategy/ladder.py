@@ -61,7 +61,6 @@ def _certainty(price: float, window_frac: float, cfg: Config) -> float:
     return pc * tc
 
 
-
 def _favorite_ladder(
     side: Side, fav_price: float, size: int, cfg: Config,
 ) -> list[Quote]:

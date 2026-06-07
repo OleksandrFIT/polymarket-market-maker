@@ -51,15 +51,17 @@ RECORDED_LIVE_BASELINE = -282.53  # from state.db: 37 resolved markets, 8W/29L
 
 
 def sweep() -> None:
-    """Grid over max_entry_price; print PnL per ceiling (price band chosen on data)."""
+    """Grid over favorite_min_price x entry_start_frac (phase-16 profitable-region check)."""
     markets = load_markets_from_db()
     series_by_market = {m.market_id: fetch_price_series(m) for m in markets}
     summaries: list[ConfigSummary] = []
-    for cap in (0.75, 0.85, 0.92, 0.97):
-        cfg = replace(Config(), max_entry_price=cap)
-        summaries.append(
-            run_config(cfg, markets, series_by_market, f"cap={cap}")
-        )
+    for fmin in (0.80, 0.85, 0.90):
+        for estart in (0.50, 0.60, 0.70):
+            cfg = replace(Config(), favorite_min_price=fmin, entry_start_frac=estart)
+            summaries.append(
+                run_config(cfg, markets, series_by_market,
+                           f"fmin={fmin} estart={estart}")
+            )
     summaries.sort(key=lambda s: s.total_pnl, reverse=True)
     _print_table(summaries)
 
@@ -67,10 +69,10 @@ def sweep() -> None:
 def main() -> None:
     markets = load_markets_from_db()
     series_by_market = {m.market_id: fetch_price_series(m) for m in markets}
-    phase15 = run_config(Config(), markets, series_by_market, "phase-15(late-fav)")
-    _print_table([phase15])
+    phase16 = run_config(Config(), markets, series_by_market, "phase-16(commit-one-side)")
+    _print_table([phase16])
     print(f"\nRecorded live baseline (state.db): {RECORDED_LIVE_BASELINE:.2f}")
-    delta = phase15.total_pnl - RECORDED_LIVE_BASELINE
+    delta = phase16.total_pnl - RECORDED_LIVE_BASELINE
     print(f"Delta vs live baseline: {delta:+.2f}")
 
 

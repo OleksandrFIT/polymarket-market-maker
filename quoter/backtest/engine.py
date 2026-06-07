@@ -27,6 +27,8 @@ def run_market(
             mid_yes=now.yes_price,
             time_to_expiry=float(tte),
             prev_mid_yes=prev_yes,
+            inventory_yes_qty=int(yes_qty),
+            inventory_no_qty=int(no_qty),
             timeframe=window.timeframe,
             asset=window.asset,
             window_length_sec=float(window.window_length),
