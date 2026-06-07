@@ -10,6 +10,7 @@ from quoter.book.book_manager import BookManager
 from quoter.config import Config
 from quoter.execution.paper_executor import PaperExecutor
 from quoter.markets import Market
+from quoter.ops.live_settings import LiveSettings
 from quoter.ops.metrics import make_app
 from quoter.persistence.state import State
 from quoter.quoter_loop import QuoterLoop
@@ -31,9 +32,15 @@ def _market(mid: str, asset: str = "BTC") -> Market:
     )
 
 
-def _build_app(quoter: QuoterLoop, state: State | None = None) -> object:
+def _build_app(
+    quoter: QuoterLoop,
+    state: State | None = None,
+    live_settings: LiveSettings | None = None,
+) -> object:
     cfg = Config(mode="paper")
     inv = Inventory()
+    if live_settings is None:
+        live_settings = LiveSettings(cfg)
     return make_app(
         cfg=cfg,
         inventory=inv,
@@ -42,6 +49,7 @@ def _build_app(quoter: QuoterLoop, state: State | None = None) -> object:
         risk=RiskGuard(cfg, inv),
         book_manager=quoter.bm,
         state=state,
+        live_settings=live_settings,
     )
 
 
@@ -127,6 +135,7 @@ class TestClearEndpoint:
         app = make_app(
             cfg=cfg, inventory=inv, executor=ex, quoter=quoter,
             risk=RiskGuard(cfg, inv), book_manager=quoter.bm, state=state,
+            live_settings=LiveSettings(cfg),
         )
         try:
             async with TestClient(TestServer(app)) as client:
@@ -149,6 +158,7 @@ class TestRiskEndpoint:
         app = make_app(
             cfg=cfg, inventory=inv, executor=quoter.exec, quoter=quoter,
             risk=risk, book_manager=quoter.bm, state=None,
+            live_settings=LiveSettings(cfg),
         )
         async with TestClient(TestServer(app)) as client:
             r = await client.post("/api/risk", json={"pct": 100})
@@ -165,9 +175,40 @@ class TestRiskEndpoint:
         app = make_app(
             cfg=cfg, inventory=inv, executor=quoter.exec, quoter=quoter,
             risk=risk, book_manager=quoter.bm, state=None,
+            live_settings=LiveSettings(cfg),
         )
         async with TestClient(TestServer(app)) as client:
             r = await client.get("/api/metrics")
             risk_block = (await r.json())["risk"]
         assert risk_block["max_daily_loss_usd"] == 50.0
         assert risk_block["pct"] == 50.0
+
+
+class TestSettingsEndpoint:
+    async def test_get_settings(self):
+        quoter = _quoter([])
+        app = _build_app(quoter)
+        async with TestClient(TestServer(app)) as client:
+            r = await client.get("/api/settings")
+            assert r.status == 200
+            data = await r.json()
+            assert "per_market_cap_usd" in data and "favorite_min_price" in data
+
+    async def test_post_settings_applies(self):
+        quoter = _quoter([])
+        app = _build_app(quoter)
+        async with TestClient(TestServer(app)) as client:
+            r = await client.post("/api/settings", json={"key": "per_market_cap_usd", "value": 15})
+            assert r.status == 200
+            g = await (await client.get("/api/settings")).json()
+            assert g["per_market_cap_usd"] == 15.0
+
+    async def test_post_settings_bad_400(self):
+        quoter = _quoter([])
+        app = _build_app(quoter)
+        async with TestClient(TestServer(app)) as client:
+            r = await client.post("/api/settings", json={"key": "favorite_min_price", "value": 9})
+            assert r.status == 400
+            r2 = await client.post("/api/settings", json={"key": "nope", "value": 1})
+            assert r2.status == 400
+            assert (await client.get("/api/settings")).status == 200

@@ -236,7 +236,7 @@ async def _amain() -> None:  # noqa: C901  (entry-point orchestration, hard to s
     dashboard_app = make_app(
         cfg=cfg, inventory=inventory, executor=executor, quoter=quoter,
         risk=risk, book_manager=book_manager, state=state,
-        session_ts=session_ts,
+        session_ts=session_ts, live_settings=live_settings,
     )
 
     tasks = [

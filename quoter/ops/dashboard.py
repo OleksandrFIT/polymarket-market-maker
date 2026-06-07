@@ -143,6 +143,12 @@ HTML_DASHBOARD = r"""<!doctype html>
   <button class="risk-btn" onclick="clearAll()">🗑 Clear all data</button>
 </div>
 
+<h2>Tactic settings (live — applies next window)</h2>
+<div class="card" id="settings-card">
+  <div id="settings-fields" class="row" style="flex-wrap: wrap; gap: 12px;"></div>
+  <span id="settings-status" class="muted"></span>
+</div>
+
 <h2>P&amp;L by period</h2>
 <div class="periods">
   <div class="period">
@@ -664,6 +670,45 @@ async function setRisk() {
   }
 }
 
+const SETTING_KEYS = [
+  "per_market_cap_usd","favorite_min_price","max_entry_price","entry_start_frac",
+  "flat_size","rise_tolerance_cents","favorite_ladder_levels",
+  "velocity_confirm_threshold","min_time_to_expiry_sec"
+];
+async function loadSettings() {
+  const r = await fetch("/api/settings");
+  const s = await r.json();
+  const box = document.getElementById("settings-fields");
+  box.innerHTML = "";
+  for (const k of SETTING_KEYS) {
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "display:flex;flex-direction:column;gap:2px;";
+    wrap.innerHTML = `<label class="muted" style="font-size:11px;">${k}</label>`;
+    const inp = document.createElement("input");
+    inp.type = "number"; inp.step = "any"; inp.id = "set-" + k; inp.value = s[k];
+    inp.style.width = "120px";
+    const btn = document.createElement("button");
+    btn.className = "fbtn"; btn.textContent = "Apply";
+    btn.onclick = () => setSetting(k);
+    const rowEl = document.createElement("div");
+    rowEl.style.cssText = "display:flex;gap:4px;";
+    rowEl.appendChild(inp); rowEl.appendChild(btn);
+    wrap.appendChild(rowEl); box.appendChild(wrap);
+  }
+}
+async function setSetting(key) {
+  const val = document.getElementById("set-" + key).value;
+  const st = document.getElementById("settings-status");
+  const r = await fetch("/api/settings", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({key, value: parseFloat(val)})
+  });
+  const d = await r.json();
+  if (r.status !== 200) { st.textContent = "❌ " + d.error; st.style.color = "#e66"; }
+  else if (d.warning) { st.textContent = "⚠ " + d.warning; st.style.color = "#ec6"; }
+  else { st.textContent = "✓ " + key + " = " + val; st.style.color = "#6e6"; }
+}
+
 async function clearAll() {
   if (!confirm('Wipe all fills, positions, markets, and sessions? This cannot be undone.')) return;
   await fetch('/api/clear', { method: 'POST' });
@@ -681,6 +726,7 @@ async function refreshAll() {
 
 paintFilterButtons();
 refreshAll();
+loadSettings();
 setRefresh();
 window.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 </script>

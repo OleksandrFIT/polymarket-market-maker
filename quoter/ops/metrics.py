@@ -25,6 +25,7 @@ from aiohttp import web
 from quoter.book.book_manager import BookManager
 from quoter.config import Config
 from quoter.ops.dashboard import HTML_DASHBOARD
+from quoter.ops.live_settings import LiveSettings
 from quoter.ops.logger import get_logger
 from quoter.persistence.state import State
 from quoter.quoter_loop import QuoterLoop
@@ -44,6 +45,7 @@ def make_app(  # noqa: C901
     book_manager: BookManager,
     state: State | None,
     session_ts: float = 0.0,
+    live_settings: LiveSettings,
 ) -> web.Application:
     app = web.Application()
 
@@ -499,6 +501,22 @@ def make_app(  # noqa: C901
             {"max_daily_loss_usd": round(usd, 2), "pct": round(pct, 1), "stopped": risk.stopped}
         )
 
+    async def get_settings(_request: web.Request) -> web.Response:
+        return web.json_response(live_settings.effective())
+
+    async def post_settings(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            key = body["key"]
+            value = body["value"]
+        except Exception:
+            return web.json_response({"error": "expected JSON {key, value}"}, status=400)
+        try:
+            result = live_settings.update(key, value)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response(result)
+
     app.router.add_get("/", root)
     app.router.add_get("/api/metrics", metrics)
     app.router.add_get("/api/positions", positions)
@@ -510,6 +528,8 @@ def make_app(  # noqa: C901
     app.router.add_get("/api/stats_periods", stats_periods)
     app.router.add_post("/api/clear", clear)
     app.router.add_post("/api/risk", set_risk)
+    app.router.add_get("/api/settings", get_settings)
+    app.router.add_post("/api/settings", post_settings)
     return app
 
 
