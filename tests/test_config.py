@@ -50,13 +50,12 @@ class TestConfig:
         with pytest.raises(FrozenInstanceError):
             c.bankroll_usd = 999  # type: ignore[misc]
 
-    def test_phase15_defaults(self):
+    def test_phase16_defaults(self):
         c = Config()
-        assert c.favorite_min_price == 0.55
-        assert c.max_entry_price == 0.95
-        assert c.entry_start_frac == 0.30
-        assert c.certainty_size_base == 5
-        assert c.certainty_size_max == 40
+        assert c.favorite_min_price == 0.85
+        assert c.max_entry_price == 0.97
+        assert c.entry_start_frac == 0.60
+        assert c.flat_size == 10
         assert c.per_market_cap_usd == 50.0
         assert c.certainty_cap_multiplier == 2.0
         assert c.velocity_confirm_threshold == 0.0005

@@ -30,11 +30,10 @@ class Config:
     # converged toward the outcome, so we BUY the favorite (the side priced
     # > 0.5), one side only, scaling size with certainty, never adding to a
     # falling side. Buy-only, held to resolution.
-    favorite_min_price: float = 0.55       # below this no clear favorite → no quotes
-    max_entry_price: float = 0.95          # hard ceiling on any bid (backtest-swept)
-    entry_start_frac: float = 0.30         # no entries before this fraction of window
-    certainty_size_base: int = 5           # base shares per tick (Polymarket min)
-    certainty_size_max: int = 40           # shares per tick at max certainty
+    favorite_min_price: float = 0.85       # phase-16: only near-certain favorites
+    max_entry_price: float = 0.97          # phase-16: allow >=0.95 like competitor
+    entry_start_frac: float = 0.60         # phase-16: only the last 40% of window
+    flat_size: int = 10                    # phase-16: flat shares per tick (no ramp-into-price)
     per_market_cap_usd: float = 50.0       # $ ceiling on ACCUMULATED favorite spend per market
     certainty_cap_multiplier: float = 2.0  # cap scales up to ×this under certainty
     velocity_confirm_threshold: float = 0.0005  # min Binance velocity to confirm side (0.05% per lookback)
