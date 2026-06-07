@@ -77,3 +77,17 @@ def test_effective_has_all_keys(tmp_path):
     eff = ls.effective()
     assert set(eff) == set(ALLOWED_KEYS)
     assert eff["favorite_min_price"] == Config().favorite_min_price
+
+
+def test_update_bool_rejected(tmp_path):
+    ls = _ls(tmp_path)
+    with pytest.raises(ValueError):
+        ls.update("per_market_cap_usd", True)
+
+
+def test_update_returns_all_effective_keys(tmp_path):
+    ls = _ls(tmp_path)
+    res = ls.update("flat_size", 7)
+    for k in ALLOWED_KEYS:
+        assert k in res
+    assert res["flat_size"] == 7

@@ -82,7 +82,7 @@ class LiveSettings:
         num = self._coerce(key, value)
         self._overrides[key] = num
         self._persist()
-        result: dict[str, Any] = dict(self._overrides)
+        result: dict[str, Any] = self.effective()
         warn = self._band_warning()
         if warn:
             result["warning"] = warn
