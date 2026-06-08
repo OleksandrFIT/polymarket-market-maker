@@ -31,7 +31,12 @@ class Quote:
 
 
 def _ladder(side: Side, top_price: float, size: int, levels: int) -> list[Quote]:
-    """`levels` bids descending by 1c from `top_price`, skipping prices <= 0."""
+    """`levels` bids descending by 1c from `top_price`, skipping prices <= 0.
+
+    Near the price extremes one leg may yield fewer rungs than the other (lower
+    rungs round to <= 0 and are skipped); the balance gate bounds the resulting
+    naked drift, so the asymmetry is acceptable.
+    """
     out: list[Quote] = []
     for i in range(levels):
         p = round(top_price - i * 0.01, 2)

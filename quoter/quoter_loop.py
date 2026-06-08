@@ -60,7 +60,6 @@ class QuoterLoop:
         risk: RiskGuard,
         get_binance_price: Callable[[str], float | None],
         on_fill: Callable[[str, str, float, int], Awaitable[None]] | None = None,
-        get_binance_velocity: Callable[[str, float], float | None] | None = None,
         live: LiveSettings | None = None,
     ) -> None:
         self.cfg = cfg
@@ -70,7 +69,6 @@ class QuoterLoop:
         self.inv = inventory
         self.risk = risk
         self.get_binance = get_binance_price
-        self.get_binance_velocity = get_binance_velocity
         self._on_fill = on_fill
         self.live = live if live is not None else LiveSettings(cfg)
 
@@ -229,7 +227,9 @@ class QuoterLoop:
                     log.warning("on_fill_callback_error", error=str(e))
         # Phase-19: merge matched Up+Down pairs to $1.00, locking the spread and
         # capping naked exposure. PnL-equivalent to holding to resolution but
-        # realizes early and frees capital.
+        # realizes early and frees capital. The reduced position is persisted by
+        # the periodic snapshot loop (it dumps live inventory, not a fills log);
+        # realized_pnl is in-memory and surfaced on the dashboard.
         if fills:
             pos = self.inv.positions.get(market_id)
             if pos is not None and pos.matched > 0:

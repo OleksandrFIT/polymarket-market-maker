@@ -37,11 +37,6 @@ class Config:
     per_market_cap_usd: float = 50.0     # $ ceiling on ACCUMULATED spend per market
     min_time_to_expiry_sec: float = 5.0  # below this → no quotes
 
-    # ── Phase-12 Binance velocity signal ──
-    velocity_short_lookback_sec: float = 30.0   # for directional skew gating
-    velocity_long_lookback_sec: float = 60.0    # for conviction confirmation
-    velocity_buffer_max_age_sec: float = 300.0
-
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle
     requote_on_mid_move_cents: int = 1

@@ -20,7 +20,7 @@ log = get_logger("live_settings")
 # key -> (type, min, max)
 _SPEC: dict[str, tuple[type, float, float]] = {
     "merge_edge": (float, 0.002, 0.04),
-    "max_naked_shares": (int, 0, 200),
+    "max_naked_shares": (int, 1, 200),  # floor 1: a 0 cap would silently disable all quoting
     "merge_levels": (int, 1, 5),
     "flat_size": (int, 1, 200),
     "per_market_cap_usd": (float, 1.0, 500.0),

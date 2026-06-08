@@ -44,7 +44,6 @@ from quoter.persistence.state import State  # noqa: E402
 from quoter.quoter_loop import QuoterLoop  # noqa: E402
 from quoter.risk.caps import RiskGuard  # noqa: E402
 from quoter.strategy.inventory import Inventory  # noqa: E402
-from quoter.strategy.price_buffer import MultiAssetPriceBuffer  # noqa: E402
 
 
 def _build_executor(cfg: Config) -> Any:
@@ -157,10 +156,6 @@ async def _amain() -> None:  # noqa: C901  (entry-point orchestration, hard to s
     executor = _build_executor(cfg)
     risk = RiskGuard(cfg, inventory)
     binance_latest: dict[str, float] = {}
-    # Phase-12: rolling price buffer for velocity computation
-    price_buf = MultiAssetPriceBuffer(
-        cfg.assets, max_age_sec=cfg.velocity_buffer_max_age_sec,
-    )
 
     # ── LIVE setup: register tokens with executor + startup cleanup ──
     if isinstance(executor, LiveExecutor):
@@ -194,7 +189,6 @@ async def _amain() -> None:  # noqa: C901  (entry-point orchestration, hard to s
         executor=executor, inventory=inventory, risk=risk,
         get_binance_price=binance_latest.get,
         on_fill=persist_fill,
-        get_binance_velocity=price_buf.velocity,
         live=live_settings,
     )
     # Subscribe listener for any token added later via MarketLifecycle.
@@ -216,7 +210,6 @@ async def _amain() -> None:  # noqa: C901  (entry-point orchestration, hard to s
 
     async def on_btc_price(asset: str, price: float, ts: float) -> None:
         binance_latest[asset] = price
-        price_buf.add(asset, price, ts)
         quoter.mark_dirty_by_asset(asset)
 
     async def on_poly_event(msg: dict) -> None:
