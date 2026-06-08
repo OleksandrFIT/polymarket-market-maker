@@ -69,11 +69,12 @@ def sweep() -> None:
 def main() -> None:
     markets = load_markets_from_db()
     series_by_market = {m.market_id: fetch_price_series(m) for m in markets}
-    phase16 = run_config(Config(), markets, series_by_market, "phase-16(commit-one-side)")
-    _print_table([phase16])
+    p17 = run_config(Config(), markets, series_by_market, "phase-17(lottery on)")
+    p16 = run_config(replace(Config(), lottery_size=0), markets, series_by_market,
+                     "phase-16(lottery off)")
+    _print_table([p17, p16])
     print(f"\nRecorded live baseline (state.db): {RECORDED_LIVE_BASELINE:.2f}")
-    delta = phase16.total_pnl - RECORDED_LIVE_BASELINE
-    print(f"Delta vs live baseline: {delta:+.2f}")
+    print(f"Lottery delta (p17 - p16): {p17.total_pnl - p16.total_pnl:+.2f}")
 
 
 if __name__ == "__main__":
