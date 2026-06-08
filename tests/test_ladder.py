@@ -74,3 +74,10 @@ def test_lottery_size_zero_disables():
     out = compute_ladder(replace(Config(), lottery_size=0), mid_yes=0.90,
                          time_to_expiry=LATE_TTE, velocity_short=None)
     assert out == []
+
+
+def test_no_double_buy_at_band_boundary():
+    # mid 0.60 + down velocity → momentum NO@0.40; lottery must NOT also fire NO@0.40.
+    out = compute_ladder(Config(), mid_yes=0.60, time_to_expiry=LATE_TTE, velocity_short=VDN)
+    seen = [(q.side, q.price) for q in out]
+    assert len(seen) == len(set(seen)), f"duplicate (side,price): {seen}"

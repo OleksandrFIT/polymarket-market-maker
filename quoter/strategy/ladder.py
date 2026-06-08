@@ -26,10 +26,11 @@ class Quote:
 def _favorite_ladder(
     side: Side, fav_price: float, size: int, cfg: Config,
 ) -> list[Quote]:
-    """`favorite_ladder_levels` bids descending by 1c from fav_price.
+    """`favorite_ladder_levels` bids descending by 1c from the entry price.
 
-    Top bid sits AT the favorite price so it actually fills as the favorite
-    firms; lower bids catch small dips. All capped at max_entry_price.
+    Top bid sits AT the entry price so it fills as the side firms; lower bids
+    catch small dips. All capped at max_entry_price (inherited bound; under the
+    momentum band [<=0.65] it never binds).
     """
     top = min(round(fav_price, 2), cfg.max_entry_price)
     out: list[Quote] = []
@@ -83,8 +84,9 @@ def _lottery_leg(
 ) -> list[Quote]:
     """Small cheap-tail lottery bids on the underdog side (competitor parity).
 
-    Exempt from the favorite-leg gates (commit-one-side, entry_start_frac,
-    velocity, favorite_min_price). Bounded by its own small lottery_cap_usd.
+    Exempt from the momentum-leg gates (commit-one-side, velocity, price band).
+    Bounded by its own small lottery_cap_usd; fires only for underdog price
+    strictly below lottery_max_price (the momentum band starts there).
     """
     if cfg.lottery_size <= 0 or cfg.lottery_levels <= 0:
         return []
@@ -93,7 +95,7 @@ def _lottery_leg(
         side, price = "NO", round(1.0 - mid_yes, 2)
     else:
         side, price = "YES", round(mid_yes, 2)
-    if price <= 0.0 or price > cfg.lottery_max_price:
+    if price <= 0.0 or price >= cfg.lottery_max_price:
         return []
     udog_qty = inventory_yes_qty if side == "YES" else inventory_no_qty
     if udog_qty * price >= cfg.lottery_cap_usd:
