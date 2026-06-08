@@ -22,11 +22,12 @@ Lottery delta (p17 - p16): -52.70
 
 ### (a) Lottery is ~3-4% of capital — near-neutral expectation is correct
 
-The lottery leg allocates `lottery_size` (default 3 USDC) per qualifying tick,
-which is ~3-4% of the typical `max_spend` budget.  A ~53 USDC drag over 39 markets
-works out to ~1.36 USDC per market in the backtest, which is structurally expected:
-the lottery buys underdog tails at 0.05–0.15 and the fill model marks them to zero
-at resolution unless the underdog actually wins.
+The lottery leg allocates `lottery_size` (default 5 shares) per bid across up to
+`lottery_levels` (default 2) ticks, bounded by `lottery_cap_usd` (default 3 USDC)
+per side — roughly 3-4% of the typical `max_spend` budget.  A ~53 USDC drag over
+39 markets works out to ~1.36 USDC per market in the backtest, which is structurally
+expected: the lottery buys underdog tails at 0.05–0.15 and the fill model marks them
+to zero at resolution unless the underdog actually wins.
 
 The lottery's purpose is **profile identity** (showing two-sided presence on
 Polymarket) and potential outsized payoff when an underdog wins — not a mean PnL

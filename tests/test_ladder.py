@@ -36,16 +36,16 @@ def test_caps_at_max_entry_price():
 
 
 def test_commit_one_side_holds_yes():
-    # inventory_yes=40 → $-value = 40*0.10=$4 > $3 lottery_cap → committed; favorite NO blocked
+    # inventory_yes=80 → $-value = 80*0.10=$8 > $7 max-lottery threshold → committed; favorite NO blocked
     out = compute_ladder(Config(), mid_yes=0.10, time_to_expiry=LATE_TTE,
-                         inventory_yes_qty=40)
+                         inventory_yes_qty=80)
     assert all(q.side == "YES" for q in out)
 
 
 def test_commit_one_side_holds_no():
-    # inventory_no=40 → $-value = 40*0.10=$4 > $3 lottery_cap → committed; favorite YES blocked
+    # inventory_no=80 → $-value = 80*0.10=$8 > $7 max-lottery threshold → committed; favorite YES blocked
     out = compute_ladder(Config(), mid_yes=0.90, time_to_expiry=LATE_TTE,
-                         inventory_no_qty=40)
+                         inventory_no_qty=80)
     assert all(q.side == "NO" for q in out)
 
 
@@ -129,11 +129,20 @@ def test_lottery_does_not_deadlock_favorite():
 
 
 def test_real_favorite_does_not_flip():
-    # Hold YES 60 (real favorite, value 60*0.10=$6 > $3 cap). Market flipped to mid 0.10
-    # so NO is now the favorite. The favorite leg must NOT start buying NO (no flip-chasing).
-    out = compute_ladder(Config(), mid_yes=0.10, time_to_expiry=LATE_TTE,
-                         inventory_yes_qty=60)
+    # Real favorite YES, value 90*0.15=$13.5 > max-lottery threshold. Market flipped to
+    # mid 0.15 (NO is now the near-certain favorite). Favorite leg must NOT buy NO.
+    out = compute_ladder(Config(), mid_yes=0.15, time_to_expiry=LATE_TTE,
+                         inventory_yes_qty=90)
     assert not any(q.side == "NO" and q.price >= Config().favorite_min_price for q in out)
+
+
+def test_lottery_overshoot_does_not_deadlock():
+    # Lottery overshot to 40 NO shares (value 40*0.10=$4 < $7 threshold). Favorite YES
+    # must STILL quote — a pure-lottery overshoot must not lock the favorite.
+    out = compute_ladder(Config(), mid_yes=0.90, time_to_expiry=LATE_TTE,
+                         inventory_no_qty=40)
+    fav = [q for q in out if q.price >= Config().favorite_min_price]
+    assert fav and all(q.side == "YES" for q in fav)
 
 
 def test_per_market_cap_stops_adds():

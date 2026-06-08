@@ -107,12 +107,14 @@ def _favorite_leg(
         return []
 
     # Commit-to-one-side: a side counts as the committed FAVORITE only if its $ value
-    # exceeds the lottery cap. The lottery alone can never hold more than lottery_cap_usd
-    # on a side, so this prevents a small early lottery holding (which fires before the
-    # favorite window opens) from deadlocking the favorite, while still stopping the real
-    # favorite bet from flipping to the other side.
-    yes_committed = inventory_yes_qty * mid_yes > cfg.lottery_cap_usd
-    no_committed = inventory_no_qty * (1.0 - mid_yes) > cfg.lottery_cap_usd
+    # exceeds the MOST the lottery alone could ever hold on a side — its cap plus one
+    # tick of pre-add overshoot. Below that, the holding might be pure lottery, so it
+    # must NOT lock the favorite (prevents the lottery from deadlocking the favorite).
+    # Still blocks a genuine favorite (which buys flat_size at >= favorite_min_price,
+    # i.e. >= ~$8/tick) from flipping to the other side.
+    max_lottery_usd = cfg.lottery_cap_usd + cfg.lottery_size * cfg.lottery_levels * cfg.lottery_max_price
+    yes_committed = inventory_yes_qty * mid_yes > max_lottery_usd
+    no_committed = inventory_no_qty * (1.0 - mid_yes) > max_lottery_usd
     if yes_committed and side == "NO":
         return []
     if no_committed and side == "YES":
@@ -146,6 +148,7 @@ def _lottery_leg(
     """
     if cfg.lottery_size <= 0 or cfg.lottery_levels <= 0:
         return []
+    side: Side
     if mid_yes >= 0.5:
         side, price = "NO", round(1.0 - mid_yes, 2)
     else:
