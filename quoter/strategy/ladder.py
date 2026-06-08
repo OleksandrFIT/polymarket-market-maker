@@ -1,14 +1,4 @@
-"""Phase-16/17 strategy: commit-to-one-side favorite engine + cheap-tail lottery leg.
-
-We follow the Polymarket price. Late in the window (last 40%) the mid has
-converged toward the actual outcome, so we BUY the near-certain favorite
-(price >= favorite_min_price), committing to one side only for the window.
-Size is flat (cfg.flat_size shares per tick — no certainty ramp).
-Never adding to a falling side (anti-knife). Buy-only; positions held to resolution.
-
-Phase-17 adds a small cheap-tail lottery leg on the underdog side (competitor
-parity): a few bids at low prices, exempt from the favorite gates, bounded by
-its own small lottery_cap_usd budget.
+"""Phase-18 strategy: velocity-driven momentum entry (cheap side) + cheap-tail lottery leg.
 
 Pure function: compute_ladder(cfg, mid_yes, time_to_expiry, ...) -> list[Quote].
 All state (the previous mid, inventory) is passed in by the caller.
@@ -33,38 +23,6 @@ class Quote:
     size: int     # shares; Polymarket min 5
 
 
-def _pick_favorite_side(
-    mid_yes: float, velocity_short: float | None, cfg: Config,
-) -> Side | None:
-    """Favorite = the side priced > 0.5. Require Binance velocity to agree if given.
-
-    velocity_short None (e.g. backtest) → skip the confirmation (mid-only).
-    """
-    side: Side = "YES" if mid_yes > 0.5 else "NO"
-    if velocity_short is not None:
-        thr = cfg.velocity_confirm_threshold
-        if side == "YES" and velocity_short < thr:
-            return None
-        if side == "NO" and velocity_short > -thr:
-            return None
-    return side
-
-
-def _certainty(price: float, window_frac: float, cfg: Config) -> float:
-    """Score in [0, 1] rising with BOTH favorite price and window progress.
-
-    Product form: certainty is high only when the price is firm AND the window
-    is late — mirroring the competitor's dollar curve (small early, big late).
-    """
-    pc = (price - cfg.favorite_min_price) / max(
-        cfg.max_entry_price - cfg.favorite_min_price, 1e-9,
-    )
-    tc = (window_frac - cfg.entry_start_frac) / max(1.0 - cfg.entry_start_frac, 1e-9)
-    pc = min(1.0, max(0.0, pc))
-    tc = min(1.0, max(0.0, tc))
-    return pc * tc
-
-
 def _favorite_ladder(
     side: Side, fav_price: float, size: int, cfg: Config,
 ) -> list[Quote]:
@@ -83,35 +41,27 @@ def _favorite_ladder(
     return out
 
 
-def _favorite_leg(
+def _momentum_leg(
     cfg: Config,
     mid_yes: float,
-    time_to_expiry: float,
-    prev_mid_yes: float | None,
+    velocity_short: float | None,
     inventory_yes_qty: int,
     inventory_no_qty: int,
-    timeframe: str,
-    window_length_sec: float | None,
-    velocity_short: float | None,
 ) -> list[Quote]:
-    """Phase-16 favorite engine (unchanged except commit uses majority holding)."""
-    if window_length_sec is None:
-        window_length_sec = 900.0 if timeframe == "15m" else 300.0
-    time_into_window = max(0.0, window_length_sec - time_to_expiry)
-    window_frac = min(1.0, time_into_window / window_length_sec)
-    if window_frac < cfg.entry_start_frac:
+    """Buy the side Binance momentum favors WHILE STILL CHEAP (cost-basis fix).
+
+    Side comes from the velocity sign (not the current favorite); we only buy in
+    the cheap band [momentum_min_price, momentum_max_price] so the average cost
+    basis stays low. No signal (incl. backtest velocity=None) → no bids.
+    """
+    if velocity_short is None or abs(velocity_short) < cfg.momentum_velocity_threshold:
+        return []
+    side: Side = "YES" if velocity_short > 0 else "NO"
+    price = round(mid_yes, 2) if side == "YES" else round(1.0 - mid_yes, 2)
+    if not (cfg.momentum_min_price <= price <= cfg.momentum_max_price):
         return []
 
-    side = _pick_favorite_side(mid_yes, velocity_short, cfg)
-    if side is None:
-        return []
-
-    # Commit-to-one-side: a side counts as the committed FAVORITE only if its $ value
-    # exceeds the MOST the lottery alone could ever hold on a side — its cap plus one
-    # tick of pre-add overshoot. Below that, the holding might be pure lottery, so it
-    # must NOT lock the favorite (prevents the lottery from deadlocking the favorite).
-    # Still blocks a genuine favorite (which buys flat_size at >= favorite_min_price,
-    # i.e. >= ~$8/tick) from flipping to the other side.
+    # Commit-to-one-side ($-value threshold, robust to lottery — same as phase-17).
     max_lottery_usd = cfg.lottery_cap_usd + cfg.lottery_size * cfg.lottery_levels * cfg.lottery_max_price
     yes_committed = inventory_yes_qty * mid_yes > max_lottery_usd
     no_committed = inventory_no_qty * (1.0 - mid_yes) > max_lottery_usd
@@ -120,22 +70,12 @@ def _favorite_leg(
     if no_committed and side == "YES":
         return []
 
-    fav_price = mid_yes if side == "YES" else (1.0 - mid_yes)
-    if fav_price < cfg.favorite_min_price:
+    # Per-market cap (flat).
+    qty = inventory_yes_qty if side == "YES" else inventory_no_qty
+    if qty * price >= cfg.per_market_cap_usd:
         return []
 
-    if prev_mid_yes is not None:
-        prev_fav = prev_mid_yes if side == "YES" else (1.0 - prev_mid_yes)
-        if fav_price < prev_fav - cfg.rise_tolerance_cents:
-            return []
-
-    c = _certainty(fav_price, window_frac, cfg)
-    cap_usd = cfg.per_market_cap_usd * (1.0 + c * (cfg.certainty_cap_multiplier - 1.0))
-    fav_qty = inventory_yes_qty if side == "YES" else inventory_no_qty
-    if fav_qty * fav_price >= cap_usd:
-        return []
-
-    return _favorite_ladder(side, fav_price, cfg.flat_size, cfg)
+    return _favorite_ladder(side, price, cfg.flat_size, cfg)
 
 
 def _lottery_leg(
@@ -183,12 +123,11 @@ def compute_ladder(
     committed_side: Side | None = None,
     velocity_long: float | None = None,
 ) -> list[Quote]:
-    """Favorite engine (one side, committed) + cheap-tail lottery on the underdog."""
+    """Momentum entry (velocity-favored side, bought cheap) + cheap-tail lottery."""
     if not (0.02 <= mid_yes <= 0.99) or time_to_expiry < cfg.min_time_to_expiry_sec:
         return []
-    favorite = _favorite_leg(
-        cfg, mid_yes, time_to_expiry, prev_mid_yes,
-        inventory_yes_qty, inventory_no_qty, timeframe, window_length_sec, velocity_short,
+    momentum = _momentum_leg(
+        cfg, mid_yes, velocity_short, inventory_yes_qty, inventory_no_qty,
     )
     lottery = _lottery_leg(cfg, mid_yes, inventory_yes_qty, inventory_no_qty)
-    return favorite + lottery
+    return momentum + lottery
