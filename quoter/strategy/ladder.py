@@ -1,10 +1,14 @@
-"""Phase-16 strategy: commit-to-one-side late-window favorite-buying with flat size.
+"""Phase-16/17 strategy: commit-to-one-side favorite engine + cheap-tail lottery leg.
 
 We follow the Polymarket price. Late in the window (last 40%) the mid has
 converged toward the actual outcome, so we BUY the near-certain favorite
 (price >= favorite_min_price), committing to one side only for the window.
 Size is flat (cfg.flat_size shares per tick — no certainty ramp).
 Never adding to a falling side (anti-knife). Buy-only; positions held to resolution.
+
+Phase-17 adds a small cheap-tail lottery leg on the underdog side (competitor
+parity): a few bids at low prices, exempt from the favorite gates, bounded by
+its own small lottery_cap_usd budget.
 
 Pure function: compute_ladder(cfg, mid_yes, time_to_expiry, ...) -> list[Quote].
 All state (the previous mid, inventory) is passed in by the caller.
@@ -79,6 +83,82 @@ def _favorite_ladder(
     return out
 
 
+def _favorite_leg(
+    cfg: Config,
+    mid_yes: float,
+    time_to_expiry: float,
+    prev_mid_yes: float | None,
+    inventory_yes_qty: int,
+    inventory_no_qty: int,
+    timeframe: str,
+    window_length_sec: float | None,
+    velocity_short: float | None,
+) -> list[Quote]:
+    """Phase-16 favorite engine (unchanged except commit uses majority holding)."""
+    if window_length_sec is None:
+        window_length_sec = 900.0 if timeframe == "15m" else 300.0
+    time_into_window = max(0.0, window_length_sec - time_to_expiry)
+    window_frac = min(1.0, time_into_window / window_length_sec)
+    if window_frac < cfg.entry_start_frac:
+        return []
+
+    side = _pick_favorite_side(mid_yes, velocity_short, cfg)
+    if side is None:
+        return []
+
+    # Commit-to-one-side: stick to the side we hold MORE of (favorite >> lottery shares).
+    # Identical to phase-16 when the lottery is off (only one side ever held).
+    if inventory_yes_qty > inventory_no_qty and side == "NO":
+        return []
+    if inventory_no_qty > inventory_yes_qty and side == "YES":
+        return []
+
+    fav_price = mid_yes if side == "YES" else (1.0 - mid_yes)
+    if fav_price < cfg.favorite_min_price:
+        return []
+
+    if prev_mid_yes is not None:
+        prev_fav = prev_mid_yes if side == "YES" else (1.0 - prev_mid_yes)
+        if fav_price < prev_fav - cfg.rise_tolerance_cents:
+            return []
+
+    c = _certainty(fav_price, window_frac, cfg)
+    cap_usd = cfg.per_market_cap_usd * (1.0 + c * (cfg.certainty_cap_multiplier - 1.0))
+    fav_qty = inventory_yes_qty if side == "YES" else inventory_no_qty
+    if fav_qty * fav_price >= cap_usd:
+        return []
+
+    return _favorite_ladder(side, fav_price, cfg.flat_size, cfg)
+
+
+def _lottery_leg(
+    cfg: Config, mid_yes: float, inventory_yes_qty: int, inventory_no_qty: int,
+) -> list[Quote]:
+    """Small cheap-tail lottery bids on the underdog side (competitor parity).
+
+    Exempt from the favorite-leg gates (commit-one-side, entry_start_frac,
+    velocity, favorite_min_price). Bounded by its own small lottery_cap_usd.
+    """
+    if cfg.lottery_size <= 0 or cfg.lottery_levels <= 0:
+        return []
+    if mid_yes >= 0.5:
+        side, price = "NO", round(1.0 - mid_yes, 2)
+    else:
+        side, price = "YES", round(mid_yes, 2)
+    if price <= 0.0 or price > cfg.lottery_max_price:
+        return []
+    udog_qty = inventory_yes_qty if side == "YES" else inventory_no_qty
+    if udog_qty * price >= cfg.lottery_cap_usd:
+        return []
+    out: list[Quote] = []
+    for i in range(cfg.lottery_levels):
+        p = round(price - i * 0.01, 2)
+        if p <= 0.0:
+            continue
+        out.append(Quote(side, p, cfg.lottery_size))
+    return out
+
+
 def compute_ladder(
     cfg: Config,
     mid_yes: float,
@@ -95,44 +175,12 @@ def compute_ladder(
     committed_side: Side | None = None,
     velocity_long: float | None = None,
 ) -> list[Quote]:
-    """Return one-sided favorite BUY bids. See module docstring for the rules."""
+    """Favorite engine (one side, committed) + cheap-tail lottery on the underdog."""
     if not (0.02 <= mid_yes <= 0.99) or time_to_expiry < cfg.min_time_to_expiry_sec:
         return []
-
-    if window_length_sec is None:
-        window_length_sec = 900.0 if timeframe == "15m" else 300.0
-    time_into_window = max(0.0, window_length_sec - time_to_expiry)
-    window_frac = min(1.0, time_into_window / window_length_sec)
-    if window_frac < cfg.entry_start_frac:
-        return []
-
-    side = _pick_favorite_side(mid_yes, velocity_short, cfg)
-    if side is None:
-        return []
-
-    # Phase-16 commit-to-one-side: once we hold a side this window, only quote it.
-    if inventory_yes_qty > 0 and side == "NO":
-        return []
-    if inventory_no_qty > 0 and side == "YES":
-        return []
-
-    fav_price = mid_yes if side == "YES" else (1.0 - mid_yes)
-    if fav_price < cfg.favorite_min_price:
-        return []
-
-    # Buy-on-rise: never add to a FALLING favorite (anti-knife).
-    if prev_mid_yes is not None:
-        prev_fav = prev_mid_yes if side == "YES" else (1.0 - prev_mid_yes)
-        if fav_price < prev_fav - cfg.rise_tolerance_cents:
-            return []
-
-    # Per-market cap (USD), scaled up under certainty. Spent is approximated by
-    # favorite-side shares × current favorite price.
-    c = _certainty(fav_price, window_frac, cfg)
-    cap_usd = cfg.per_market_cap_usd * (1.0 + c * (cfg.certainty_cap_multiplier - 1.0))
-    fav_qty = inventory_yes_qty if side == "YES" else inventory_no_qty
-    if fav_qty * fav_price >= cap_usd:
-        return []
-
-    size = cfg.flat_size
-    return _favorite_ladder(side, fav_price, size, cfg)
+    favorite = _favorite_leg(
+        cfg, mid_yes, time_to_expiry, prev_mid_yes,
+        inventory_yes_qty, inventory_no_qty, timeframe, window_length_sec, velocity_short,
+    )
+    lottery = _lottery_leg(cfg, mid_yes, inventory_yes_qty, inventory_no_qty)
+    return favorite + lottery
