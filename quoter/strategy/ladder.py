@@ -106,11 +106,16 @@ def _favorite_leg(
     if side is None:
         return []
 
-    # Commit-to-one-side: stick to the side we hold MORE of (favorite >> lottery shares).
-    # Identical to phase-16 when the lottery is off (only one side ever held).
-    if inventory_yes_qty > inventory_no_qty and side == "NO":
+    # Commit-to-one-side: a side counts as the committed FAVORITE only if its $ value
+    # exceeds the lottery cap. The lottery alone can never hold more than lottery_cap_usd
+    # on a side, so this prevents a small early lottery holding (which fires before the
+    # favorite window opens) from deadlocking the favorite, while still stopping the real
+    # favorite bet from flipping to the other side.
+    yes_committed = inventory_yes_qty * mid_yes > cfg.lottery_cap_usd
+    no_committed = inventory_no_qty * (1.0 - mid_yes) > cfg.lottery_cap_usd
+    if yes_committed and side == "NO":
         return []
-    if inventory_no_qty > inventory_yes_qty and side == "YES":
+    if no_committed and side == "YES":
         return []
 
     fav_price = mid_yes if side == "YES" else (1.0 - mid_yes)

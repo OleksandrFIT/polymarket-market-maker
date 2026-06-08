@@ -36,16 +36,16 @@ def test_caps_at_max_entry_price():
 
 
 def test_commit_one_side_holds_yes():
-    # inventory_yes=10 > inventory_no=0 → favorite NO blocked; YES lottery still fires
+    # inventory_yes=40 → $-value = 40*0.10=$4 > $3 lottery_cap → committed; favorite NO blocked
     out = compute_ladder(Config(), mid_yes=0.10, time_to_expiry=LATE_TTE,
-                         inventory_yes_qty=10)
+                         inventory_yes_qty=40)
     assert all(q.side == "YES" for q in out)
 
 
 def test_commit_one_side_holds_no():
-    # inventory_no=10 > inventory_yes=0 → favorite YES blocked; NO lottery still fires
+    # inventory_no=40 → $-value = 40*0.10=$4 > $3 lottery_cap → committed; favorite YES blocked
     out = compute_ladder(Config(), mid_yes=0.90, time_to_expiry=LATE_TTE,
-                         inventory_no_qty=10)
+                         inventory_no_qty=40)
     assert all(q.side == "NO" for q in out)
 
 
@@ -118,10 +118,22 @@ def test_lottery_exempt_from_entry_start():
     assert out and all(q.side == "NO" for q in out)
 
 
-def test_lottery_flip_does_not_unseat_favorite():
+def test_lottery_does_not_deadlock_favorite():
+    # Lottery filled NO early (underdog, ~$0.50 < $3 lottery cap) before the favorite
+    # window. The favorite YES must STILL quote once it qualifies — a small lottery
+    # holding must not be mistaken for a committed favorite.
     out = compute_ladder(Config(), mid_yes=0.90, time_to_expiry=LATE_TTE,
-                         inventory_yes_qty=50, inventory_no_qty=30)
-    assert any(q.side == "YES" for q in out)
+                         inventory_no_qty=5)
+    fav = [q for q in out if q.price >= Config().favorite_min_price]
+    assert fav and all(q.side == "YES" for q in fav)
+
+
+def test_real_favorite_does_not_flip():
+    # Hold YES 60 (real favorite, value 60*0.10=$6 > $3 cap). Market flipped to mid 0.10
+    # so NO is now the favorite. The favorite leg must NOT start buying NO (no flip-chasing).
+    out = compute_ladder(Config(), mid_yes=0.10, time_to_expiry=LATE_TTE,
+                         inventory_yes_qty=60)
+    assert not any(q.side == "NO" and q.price >= Config().favorite_min_price for q in out)
 
 
 def test_per_market_cap_stops_adds():
