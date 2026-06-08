@@ -23,10 +23,24 @@ changing the profitable favorite engine.
 Add a SECOND leg alongside the existing favorite leg. `compute_ladder` returns
 `favorite_bids + lottery_bids`.
 
-### Favorite leg — UNCHANGED
+### Favorite leg — extracted, one adjustment
 The existing phase-16 logic (entry_start_frac gate, favorite-side pick, commit-one-side,
-favorite_min_price, buy-on-rise, per-market cap, flat size) is extracted verbatim into a
-helper `_favorite_leg(...)`. No behavior change. It still commits to one side and never flips.
+favorite_min_price, buy-on-rise, per-market cap, flat size) is extracted into a helper
+`_favorite_leg(...)`. It still commits to one side and never flips.
+
+**One required adjustment to commit-one-side:** the lottery fills the OPPOSITE (underdog)
+side, so a small lottery holding must NOT trip the favorite leg's commit gate. The check
+changes from "hold the opposite side at all" to "hold the opposite side *more*":
+```python
+if inventory_yes_qty > inventory_no_qty and side == "NO":
+    return []
+if inventory_no_qty > inventory_yes_qty and side == "YES":
+    return []
+```
+This is **identical to phase-16 when the lottery is off** (only one side is ever held, so
+`held_side_qty > 0 = other_side_qty`), and correctly keeps the favorite committed to its
+majority side when small lottery inventory exists on the other side (favorite shares always
+exceed lottery shares: favorite cap $50 ≫ lottery cap $3).
 
 ### Lottery leg — NEW (`_lottery_leg`)
 Small buys on the UNDERDOG (cheap) side, matching the competitor's lottery sprinkle.
