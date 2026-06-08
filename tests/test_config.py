@@ -50,7 +50,7 @@ class TestConfig:
         with pytest.raises(FrozenInstanceError):
             c.bankroll_usd = 999  # type: ignore[misc]
 
-    def test_phase17_defaults(self):
+    def test_strategy_defaults(self):
         c = Config()
         assert c.favorite_min_price == 0.85
         assert c.max_entry_price == 0.97

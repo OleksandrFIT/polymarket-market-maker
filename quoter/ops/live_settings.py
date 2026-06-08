@@ -99,6 +99,8 @@ class LiveSettings:
         eff = self.effective()
         if eff["favorite_min_price"] > eff["max_entry_price"]:
             return "empty band — no trades (favorite_min_price > max_entry_price)"
+        if eff["momentum_min_price"] >= eff["momentum_max_price"]:
+            return "empty momentum band — no entries (momentum_min_price >= momentum_max_price)"
         return None
 
     def _persist(self) -> None:

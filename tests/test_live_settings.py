@@ -99,3 +99,10 @@ def test_lottery_knob_validates(tmp_path):
     assert ls.snapshot()["lottery_max_price"] == 0.30
     with pytest.raises(ValueError):
         ls.update("lottery_max_price", 0.9)  # > 0.49 range
+
+
+def test_momentum_inverted_band_warns(tmp_path):
+    ls = _ls(tmp_path)
+    ls.update("momentum_max_price", 0.55)
+    res = ls.update("momentum_min_price", 0.60)  # min >= max → empty band
+    assert "warning" in res
