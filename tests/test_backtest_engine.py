@@ -10,15 +10,16 @@ def _win_market():
                         yes_token="t")
 
 
-def test_buying_winning_favorite_is_profitable():
+def test_momentum_inert_in_backtest_without_velocity():
     cfg = Config()
-    # Late, rising YES favorite in the >=0.85 band during the last 40% of a 5m
-    # window (open=0, expire=300): times 200,240,280,295 → window_frac 0.67..0.98.
-    series = [PricePoint(200, 0.86), PricePoint(240, 0.90),
-              PricePoint(280, 0.95), PricePoint(295, 0.99)]
+    # Backtest passes velocity_short=None → momentum leg never fires. With mid 0.55
+    # the underdog price is 0.45 (>= lottery_max_price 0.40 → no lottery either),
+    # so the engine produces no fills. Documents that phase-18 cannot be backtested
+    # offline (no Binance velocity history).
+    series = [PricePoint(120, 0.55), PricePoint(180, 0.55)]
     res = run_market(cfg, _win_market(), series)
-    assert res.yes_qty > 0
-    assert res.pnl > 0
+    assert res.yes_qty == 0 and res.no_qty == 0
+    assert res.pnl == 0.0
 
 
 def test_no_favorite_no_fills_no_pnl():
