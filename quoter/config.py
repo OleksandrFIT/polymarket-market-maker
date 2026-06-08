@@ -48,6 +48,11 @@ class Config:
     lottery_size: int = 5              # shares per lottery bid (0 disables)
     lottery_levels: int = 2            # cheap-tail lottery bids per tick (0 disables)
 
+    # ── Phase-18 momentum entry (cost-basis fix: buy velocity-favored side while cheap) ──
+    momentum_velocity_threshold: float = 0.001  # min |Binance velocity| to trigger an entry
+    momentum_min_price: float = 0.40            # don't buy below (too uncertain)
+    momentum_max_price: float = 0.65            # don't buy above (missed cheap entry → -EV)
+
     # ── Phase-12 Binance velocity signal ──
     velocity_short_lookback_sec: float = 30.0   # for directional skew gating
     velocity_long_lookback_sec: float = 60.0    # for conviction confirmation

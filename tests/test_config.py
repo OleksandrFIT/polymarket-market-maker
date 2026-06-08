@@ -66,6 +66,9 @@ class TestConfig:
         assert c.lottery_cap_usd == 3.0
         assert c.lottery_size == 5
         assert c.lottery_levels == 2
+        assert c.momentum_velocity_threshold == 0.001
+        assert c.momentum_min_price == 0.40
+        assert c.momentum_max_price == 0.65
 
 
 class TestPolyCreds:

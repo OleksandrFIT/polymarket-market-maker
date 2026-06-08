@@ -32,6 +32,9 @@ _SPEC: dict[str, tuple[type, float, float]] = {
     "lottery_cap_usd": (float, 0.0, 50.0),
     "lottery_size": (int, 0, 50),
     "lottery_levels": (int, 0, 5),
+    "momentum_velocity_threshold": (float, 0.0, 0.02),
+    "momentum_min_price": (float, 0.20, 0.60),
+    "momentum_max_price": (float, 0.50, 0.90),
 }
 
 ALLOWED_KEYS = tuple(_SPEC.keys())
