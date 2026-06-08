@@ -10,23 +10,24 @@ def _win_market():
                         yes_token="t")
 
 
-def test_momentum_inert_in_backtest_without_velocity():
-    cfg = Config()
-    # Backtest passes velocity_short=None → momentum leg never fires. With mid 0.55
-    # the underdog price is 0.45 (>= lottery_max_price 0.40 → no lottery either),
-    # so the engine produces no fills. Documents that phase-18 cannot be backtested
-    # offline (no Binance velocity history).
-    series = [PricePoint(120, 0.55), PricePoint(180, 0.55)]
+def test_no_quotes_below_min_tte():
+    cfg = Config()  # min_time_to_expiry_sec = 5.0
+    # Last ticks of the window (tte < 5s) -> compute_ladder returns no bids,
+    # so the engine produces no fills regardless of price.
+    series = [PricePoint(297, 0.55), PricePoint(299, 0.50)]
     res = run_market(cfg, _win_market(), series)
     assert res.yes_qty == 0 and res.no_qty == 0
-    assert res.pnl == 0.0
-
-
-def test_no_favorite_no_fills_no_pnl():
-    cfg = Config()
-    # Flat coin-flip at 0.50 → favorite below favorite_min_price → no quotes.
-    series = [PricePoint(120, 0.50), PricePoint(180, 0.50)]
-    res = run_market(cfg, _win_market(), series)
-    assert res.yes_qty == 0
     assert res.total_cost == 0.0
     assert res.pnl == 0.0
+
+
+def test_falling_leg_fills_offline():
+    cfg = Config()
+    # YES price dips 0.55 -> 0.50, crossing our YES bid (~0.545). The offline
+    # model fills the FALLING leg only (the NO bid at ~0.445 is not reached),
+    # which is exactly the back-of-queue adverse-selection the merge-maker faces
+    # in paper — naked exposure, bounded live by us-east-1 queue priority.
+    series = [PricePoint(120, 0.55), PricePoint(180, 0.50)]
+    res = run_market(cfg, _win_market(), series)
+    assert res.yes_qty > 0
+    assert res.no_qty == 0

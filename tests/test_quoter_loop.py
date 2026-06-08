@@ -11,6 +11,7 @@ from quoter.quoter_loop import QuoterLoop
 from quoter.risk.caps import RiskGuard
 from quoter.strategy.inventory import Inventory
 from quoter.ops.live_settings import LiveSettings
+from quoter.execution.paper_executor import PaperExecutor, FillEvent
 
 
 def _market(mid: str) -> Market:
@@ -61,6 +62,58 @@ class TestPerMarketRiskGate:
         assert "M1" in ex.cancelled       # quotes pulled for the over-cap market
         assert "M1" not in ex.synced      # but no new ladder posted
         assert not risk.stopped           # bot NOT globally halted
+
+
+class _FillingExecutor(PaperExecutor):
+    """PaperExecutor whose check_fills returns a fixed list of fills."""
+
+    def __init__(self, fills):
+        super().__init__()
+        self._fixed = fills
+
+    def check_fills(self, market_id, yes_top, no_top):
+        return self._fixed
+
+
+class TestPaperMerge:
+    async def test_apply_paper_fills_merges_matched(self):
+        cfg = replace(Config(mode="paper"), max_market_position_usd=1e9)
+        inv = Inventory()
+        risk = RiskGuard(cfg, inv)
+        ex = _FillingExecutor([
+            FillEvent("M1", "YES", 0.55, 10),
+            FillEvent("M1", "NO", 0.44, 10),
+        ])
+        loop = QuoterLoop(
+            cfg=cfg, markets=[_market("M1")], book_manager=BookManager(),
+            executor=ex, inventory=inv, risk=risk, get_binance_price=lambda _a: None,
+        )
+
+        await loop._apply_paper_fills("M1", None, None)
+
+        # 10 YES + 10 NO -> 10 matched pairs merged -> both legs cleared.
+        assert inv.n_merges >= 1
+        pos = inv.positions.get("M1")
+        assert pos is None or (pos.yes_qty == 0 and pos.no_qty == 0)
+        # Locked spread = 10 * (1 - (0.55 + 0.44)) = 0.10
+        assert abs(inv.realized_pnl - 0.10) < 1e-9
+
+    async def test_naked_fill_not_merged(self):
+        cfg = replace(Config(mode="paper"), max_market_position_usd=1e9)
+        inv = Inventory()
+        risk = RiskGuard(cfg, inv)
+        ex = _FillingExecutor([FillEvent("M1", "YES", 0.55, 10)])  # one leg only
+        loop = QuoterLoop(
+            cfg=cfg, markets=[_market("M1")], book_manager=BookManager(),
+            executor=ex, inventory=inv, risk=risk, get_binance_price=lambda _a: None,
+        )
+
+        await loop._apply_paper_fills("M1", None, None)
+
+        # No NO leg -> nothing matched -> no merge; naked YES held.
+        assert inv.n_merges == 0
+        assert inv.positions["M1"].yes_qty == 10
+        assert inv.positions["M1"].no_qty == 0
 
 
 class TestLiveSettingsOverlay:

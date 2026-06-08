@@ -5,7 +5,7 @@ CLI:  .venv/bin/python -m quoter.backtest.run_backtest
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from quoter.config import Config
 from quoter.backtest.engine import run_market
@@ -47,36 +47,19 @@ def _print_table(summaries: list[ConfigSummary]) -> None:
         print(f"{s.name:28} {s.n_markets:>4} {s.total_pnl:>12.2f} {wr:>9} {s.worst:>10.2f}")
 
 
-RECORDED_LIVE_BASELINE = -282.53  # from state.db: 37 resolved markets, 8W/29L
-
-
-def sweep() -> None:
-    """Grid over favorite_min_price x entry_start_frac (phase-16 profitable-region check)."""
-    markets = load_markets_from_db()
-    series_by_market = {m.market_id: fetch_price_series(m) for m in markets}
-    summaries: list[ConfigSummary] = []
-    for fmin in (0.80, 0.85, 0.90):
-        for estart in (0.50, 0.60, 0.70):
-            cfg = replace(Config(), favorite_min_price=fmin, entry_start_frac=estart)
-            summaries.append(
-                run_config(cfg, markets, series_by_market,
-                           f"fmin={fmin} estart={estart}")
-            )
-    summaries.sort(key=lambda s: s.total_pnl, reverse=True)
-    _print_table(summaries)
-
-
 def main() -> None:
+    """Run the phase-19 merge-maker over cached windows and print a table.
+
+    NOTE: the offline fill model fills only the falling leg (no live queue
+    priority), so backtest PnL is descriptive, NOT a profit claim — the
+    merge-maker edge is realizable only live in us-east-1. See the phase-19
+    spec for the honest framing.
+    """
     markets = load_markets_from_db()
     series_by_market = {m.market_id: fetch_price_series(m) for m in markets}
-    p17 = run_config(Config(), markets, series_by_market, "phase-17(lottery on)")
-    p16 = run_config(replace(Config(), lottery_size=0), markets, series_by_market,
-                     "phase-16(lottery off)")
-    _print_table([p17, p16])
-    print(f"\nRecorded live baseline (state.db): {RECORDED_LIVE_BASELINE:.2f}")
-    print(f"Lottery delta (p17 - p16): {p17.total_pnl - p16.total_pnl:+.2f}")
+    summary = run_config(Config(), markets, series_by_market, "phase-19(merge-maker)")
+    _print_table([summary])
 
 
 if __name__ == "__main__":
-    import sys
-    sweep() if "--sweep" in sys.argv else main()
+    main()

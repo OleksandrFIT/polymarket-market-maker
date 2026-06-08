@@ -16,3 +16,6 @@ dist/
 build/
 *.egg-info/
 settings.json
+state.db*.bak
+quoter/backtest/data/
+_analyze_flips.py

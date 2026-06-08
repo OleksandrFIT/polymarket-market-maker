@@ -41,8 +41,8 @@ def test_update_valid_persists(tmp_path):
 def test_update_out_of_range_rejected(tmp_path):
     ls = _ls(tmp_path)
     with pytest.raises(ValueError):
-        ls.update("favorite_min_price", 1.5)
-    assert "favorite_min_price" not in ls.snapshot()
+        ls.update("merge_edge", 1.5)  # > 0.04 range
+    assert "merge_edge" not in ls.snapshot()
 
 
 def test_update_unknown_key_rejected(tmp_path):
@@ -65,18 +65,11 @@ def test_snapshot_is_copy(tmp_path):
     assert ls.snapshot()["flat_size"] == 7
 
 
-def test_min_price_above_max_warns(tmp_path):
-    ls = _ls(tmp_path)
-    ls.update("max_entry_price", 0.90)
-    res = ls.update("favorite_min_price", 0.95)
-    assert "warning" in res
-
-
 def test_effective_has_all_keys(tmp_path):
     ls = _ls(tmp_path)
     eff = ls.effective()
     assert set(eff) == set(ALLOWED_KEYS)
-    assert eff["favorite_min_price"] == Config().favorite_min_price
+    assert eff["merge_edge"] == Config().merge_edge
 
 
 def test_update_bool_rejected(tmp_path):
@@ -93,16 +86,17 @@ def test_update_returns_all_effective_keys(tmp_path):
     assert res["flat_size"] == 7
 
 
-def test_lottery_knob_validates(tmp_path):
+def test_merge_knob_validates(tmp_path):
     ls = _ls(tmp_path)
-    ls.update("lottery_max_price", 0.30)
-    assert ls.snapshot()["lottery_max_price"] == 0.30
+    ls.update("max_naked_shares", 30)
+    assert ls.snapshot()["max_naked_shares"] == 30
     with pytest.raises(ValueError):
-        ls.update("lottery_max_price", 0.9)  # > 0.49 range
+        ls.update("max_naked_shares", 999)  # > 200 range
 
 
-def test_momentum_inverted_band_warns(tmp_path):
+def test_merge_edge_zero_warns(tmp_path):
+    # merge_edge at its floor is valid but the band warning flags no-edge only
+    # for <= 0; the lowest allowed (0.002) should NOT warn.
     ls = _ls(tmp_path)
-    ls.update("momentum_max_price", 0.55)
-    res = ls.update("momentum_min_price", 0.60)  # min >= max → empty band
-    assert "warning" in res
+    res = ls.update("merge_edge", 0.002)
+    assert "warning" not in res

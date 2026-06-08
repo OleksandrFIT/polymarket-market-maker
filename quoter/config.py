@@ -25,33 +25,17 @@ class Config:
     assets: tuple[str, ...] = ("BTC", "ETH")
     timeframes: tuple[str, ...] = ("5m",)  # 15m disabled: paper showed -$30 vs +$39 on 5m
 
-    # ── Phase-16 late-window favorite-buying (commit-to-one-side, flat size) ──
-    # Strategy follows the Polymarket price: only in the last 40% of the window
-    # (entry_start_frac) and only when the near-certain favorite (>= favorite_min_price)
-    # is found. We BUY that side with flat_size shares per tick (no certainty ramp),
-    # commit to one side for the window (no cross-side adds), and never add to a
-    # falling side. Buy-only, held to resolution.
-    favorite_min_price: float = 0.85       # phase-16: only near-certain favorites
-    max_entry_price: float = 0.97          # phase-16: allow >=0.95 like competitor
-    entry_start_frac: float = 0.60         # phase-16: only the last 40% of window
-    flat_size: int = 10                    # phase-16: flat shares per tick (no ramp-into-price)
-    per_market_cap_usd: float = 50.0       # $ ceiling on ACCUMULATED favorite spend per market
-    certainty_cap_multiplier: float = 2.0  # cap scales up to ×this under certainty
-    velocity_confirm_threshold: float = 0.0005  # min Binance velocity to confirm side (0.05% per lookback)
-    rise_tolerance_cents: float = 0.01     # favorite may dip this much vs prev and still quote
-    favorite_ladder_levels: int = 3        # one-sided bids per tick
-    min_time_to_expiry_sec: float = 5.0    # below this → no quotes
-
-    # ── Phase-17 cheap-tail lottery leg (competitor parity) ──
-    lottery_max_price: float = 0.40    # buy underdog only if its price <= this
-    lottery_cap_usd: float = 3.0       # separate small $ budget for the lottery leg
-    lottery_size: int = 5              # shares per lottery bid (0 disables)
-    lottery_levels: int = 2            # cheap-tail lottery bids per tick (0 disables)
-
-    # ── Phase-18 momentum entry (cost-basis fix: buy velocity-favored side while cheap) ──
-    momentum_velocity_threshold: float = 0.001  # min |Binance velocity| to trigger an entry
-    momentum_min_price: float = 0.40            # don't buy below (too uncertain)
-    momentum_max_price: float = 0.65            # don't buy above (missed cheap entry → -EV)
+    # ── Phase-19 two-sided merge-maker ──
+    # Post maker bids on BOTH outcomes at a target pair cost < $1.00
+    # (Up @ mid-δ, Down @ (1-mid)-δ, where δ = merge_edge/2); the matched
+    # complementary pairs are merged to $1.00, locking the spread regardless of
+    # direction. A balance gate caps naked (one-sided) exposure. Buy-only.
+    merge_edge: float = 0.01             # target total edge per Up+Down pair (per-leg δ = /2)
+    max_naked_shares: int = 20           # hard cap on |yes_qty - no_qty|
+    merge_levels: int = 2                # bids per side per tick
+    flat_size: int = 10                  # flat shares per bid
+    per_market_cap_usd: float = 50.0     # $ ceiling on ACCUMULATED spend per market
+    min_time_to_expiry_sec: float = 5.0  # below this → no quotes
 
     # ── Phase-12 Binance velocity signal ──
     velocity_short_lookback_sec: float = 30.0   # for directional skew gating

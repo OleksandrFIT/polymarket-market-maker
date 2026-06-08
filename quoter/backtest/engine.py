@@ -13,9 +13,8 @@ def run_market(
 ) -> BacktestResult:
     """Replay `series` for `window` under `cfg`; return PnL at resolution."""
     yes_qty = no_qty = 0.0
-    total_cost = 0.0
+    yes_cost = no_cost = 0.0
     n_fills = 0
-    prev_yes: float | None = None
 
     for i in range(len(series) - 1):
         now, nxt = series[i], series[i + 1]
@@ -26,23 +25,23 @@ def run_market(
             cfg,
             mid_yes=now.yes_price,
             time_to_expiry=float(tte),
-            prev_mid_yes=prev_yes,
             inventory_yes_qty=int(yes_qty),
             inventory_no_qty=int(no_qty),
-            timeframe=window.timeframe,
-            asset=window.asset,
-            window_length_sec=float(window.window_length),
+            inventory_yes_cost=yes_cost,
+            inventory_no_cost=no_cost,
         )
         for side, price, size in simulate_interval_fills(
             desired, now.yes_price, nxt.yes_price,
         ):
             if side == "YES":
                 yes_qty += size
+                yes_cost += price * size
             else:
                 no_qty += size
-            total_cost += price * size
+                no_cost += price * size
             n_fills += 1
-        prev_yes = now.yes_price
+
+    total_cost = yes_cost + no_cost
 
     win_shares = yes_qty if window.winning_side == "YES" else no_qty
     pnl = win_shares * 1.0 - total_cost

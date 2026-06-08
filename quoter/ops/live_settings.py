@@ -19,22 +19,12 @@ log = get_logger("live_settings")
 
 # key -> (type, min, max)
 _SPEC: dict[str, tuple[type, float, float]] = {
-    "per_market_cap_usd": (float, 1.0, 500.0),
-    "favorite_min_price": (float, 0.50, 0.99),
-    "max_entry_price": (float, 0.50, 0.99),
-    "entry_start_frac": (float, 0.0, 0.95),
+    "merge_edge": (float, 0.002, 0.04),
+    "max_naked_shares": (int, 0, 200),
+    "merge_levels": (int, 1, 5),
     "flat_size": (int, 1, 200),
-    "rise_tolerance_cents": (float, 0.0, 0.10),
-    "favorite_ladder_levels": (int, 1, 10),
-    "velocity_confirm_threshold": (float, 0.0, 0.01),
+    "per_market_cap_usd": (float, 1.0, 500.0),
     "min_time_to_expiry_sec": (float, 1.0, 60.0),
-    "lottery_max_price": (float, 0.10, 0.49),
-    "lottery_cap_usd": (float, 0.0, 50.0),
-    "lottery_size": (int, 0, 50),
-    "lottery_levels": (int, 0, 5),
-    "momentum_velocity_threshold": (float, 0.0, 0.02),
-    "momentum_min_price": (float, 0.20, 0.60),
-    "momentum_max_price": (float, 0.50, 0.90),
 }
 
 ALLOWED_KEYS = tuple(_SPEC.keys())
@@ -97,10 +87,8 @@ class LiveSettings:
 
     def _band_warning(self) -> str | None:
         eff = self.effective()
-        if eff["favorite_min_price"] > eff["max_entry_price"]:
-            return "empty band — no trades (favorite_min_price > max_entry_price)"
-        if eff["momentum_min_price"] >= eff["momentum_max_price"]:
-            return "empty momentum band — no entries (momentum_min_price >= momentum_max_price)"
+        if eff["merge_edge"] <= 0.0:
+            return "no edge — pair cost >= $1.00 (merge_edge <= 0)"
         return None
 
     def _persist(self) -> None:

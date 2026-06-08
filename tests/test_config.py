@@ -52,23 +52,13 @@ class TestConfig:
 
     def test_strategy_defaults(self):
         c = Config()
-        assert c.favorite_min_price == 0.85
-        assert c.max_entry_price == 0.97
-        assert c.entry_start_frac == 0.60
+        # Phase-19 two-sided merge-maker knobs
+        assert c.merge_edge == 0.01
+        assert c.max_naked_shares == 20
+        assert c.merge_levels == 2
         assert c.flat_size == 10
         assert c.per_market_cap_usd == 50.0
-        assert c.certainty_cap_multiplier == 2.0
-        assert c.velocity_confirm_threshold == 0.0005
-        assert c.rise_tolerance_cents == 0.01
-        assert c.favorite_ladder_levels == 3
         assert c.min_time_to_expiry_sec == 5.0
-        assert c.lottery_max_price == 0.40
-        assert c.lottery_cap_usd == 3.0
-        assert c.lottery_size == 5
-        assert c.lottery_levels == 2
-        assert c.momentum_velocity_threshold == 0.001
-        assert c.momentum_min_price == 0.40
-        assert c.momentum_max_price == 0.65
 
 
 class TestPolyCreds:

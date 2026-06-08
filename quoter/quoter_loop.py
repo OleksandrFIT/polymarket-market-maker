@@ -83,7 +83,6 @@ class QuoterLoop:
         self._dirty: set[str] = set()
         self._market_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._last_requote_ts: dict[str, float] = {}
-        self._prev_mid_yes: dict[str, float] = {}
         self._tick_count = 0
 
     # ── Dynamic market lifecycle ──
@@ -106,7 +105,6 @@ class QuoterLoop:
             self._token_to_market.pop(m.no_token, None)
             self._dirty.discard(market_id)
             self._last_requote_ts.pop(market_id, None)
-            self._prev_mid_yes.pop(market_id, None)
         return m
 
     def known_tokens(self) -> list[str]:
@@ -200,36 +198,17 @@ class QuoterLoop:
             if isinstance(self.exec, PaperExecutor):
                 await self._apply_paper_fills(market_id, yes_top, no_top)
 
-            committed = self._infer_committed(market, mid_yes)
             pos = self.inv.positions.get(market_id)
-            yes_qty = pos.yes_qty if pos else 0
-            no_qty = pos.no_qty if pos else 0
-
-            # Phase-12: get Binance velocity (short for skew gate, long for conviction)
-            velo_short = velo_long = None
-            if self.get_binance_velocity is not None:
-                velo_short = self.get_binance_velocity(
-                    market.asset, self.cfg.velocity_short_lookback_sec,
-                )
-                velo_long = self.get_binance_velocity(
-                    market.asset, self.cfg.velocity_long_lookback_sec,
-                )
-
             eff_cfg = replace(self.cfg, **self.live.snapshot())
             desired = compute_ladder(
                 eff_cfg,
                 mid_yes=mid_yes,
                 time_to_expiry=tte,
-                prev_mid_yes=self._prev_mid_yes.get(market_id),
-                committed_side=committed,
-                inventory_yes_qty=yes_qty,
-                inventory_no_qty=no_qty,
-                timeframe=market.timeframe,
-                asset=market.asset,
-                velocity_short=velo_short,
-                velocity_long=velo_long,
+                inventory_yes_qty=pos.yes_qty if pos else 0,
+                inventory_no_qty=pos.no_qty if pos else 0,
+                inventory_yes_cost=pos.yes_cost_total if pos else 0.0,
+                inventory_no_cost=pos.no_cost_total if pos else 0.0,
             )
-            self._prev_mid_yes[market_id] = mid_yes
             self.exec.sync(market_id, desired)
 
             # Paper-mode: cache ask snapshot for next placement reference
@@ -248,6 +227,15 @@ class QuoterLoop:
                     await self._on_fill(f.market_id, f.side, f.price, f.size)
                 except Exception as e:
                     log.warning("on_fill_callback_error", error=str(e))
+        # Phase-19: merge matched Up+Down pairs to $1.00, locking the spread and
+        # capping naked exposure. PnL-equivalent to holding to resolution but
+        # realizes early and frees capital.
+        if fills:
+            pos = self.inv.positions.get(market_id)
+            if pos is not None and pos.matched > 0:
+                pairs = pos.matched
+                self.inv.on_merge(market_id, pairs)
+                log.info("paper_merge", market=market_id[:12], pairs=pairs)
 
     async def _on_market_expired(self, market_id: str) -> None:
         """Cancel all our quotes when a market window closes."""
@@ -271,18 +259,6 @@ class QuoterLoop:
             return yes_top.mid
         if no_top is not None and no_top.mid is not None:
             return 1.0 - no_top.mid
-        return None
-
-    def _infer_committed(self, market: Market, mid_yes: float) -> str | None:
-        """Pick the side most likely to win at resolution.
-
-        Phase 3: simple mid-based inference. Future: compare Binance spot
-        to market strike (when strike discovery lands).
-        """
-        if mid_yes > 0.55:
-            return "YES"
-        if mid_yes < 0.45:
-            return "NO"
         return None
 
     # ── Diagnostics ──

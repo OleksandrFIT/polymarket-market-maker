@@ -192,7 +192,7 @@ class TestSettingsEndpoint:
             r = await client.get("/api/settings")
             assert r.status == 200
             data = await r.json()
-            assert "per_market_cap_usd" in data and "favorite_min_price" in data
+            assert "per_market_cap_usd" in data and "merge_edge" in data
 
     async def test_post_settings_applies(self):
         quoter = _quoter([])
@@ -207,7 +207,7 @@ class TestSettingsEndpoint:
         quoter = _quoter([])
         app = _build_app(quoter)
         async with TestClient(TestServer(app)) as client:
-            r = await client.post("/api/settings", json={"key": "favorite_min_price", "value": 9})
+            r = await client.post("/api/settings", json={"key": "merge_edge", "value": 9})
             assert r.status == 400
             r2 = await client.post("/api/settings", json={"key": "nope", "value": 1})
             assert r2.status == 400
