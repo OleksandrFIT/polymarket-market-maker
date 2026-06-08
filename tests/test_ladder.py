@@ -9,11 +9,13 @@ LATE_TTE = 60.0  # 5m: window_frac = (300-60)/300 = 0.80 (>= entry_start_frac 0.
 
 
 def test_picks_higher_side_as_favorite():
-    # mid=0.90 → YES favorite + NO lottery; mid=0.10 → NO favorite + YES lottery
+    fmin = Config().favorite_min_price
     yes = compute_ladder(Config(), mid_yes=0.90, time_to_expiry=LATE_TTE)
-    assert yes and any(q.side == "YES" for q in yes)
+    fav = [q for q in yes if q.price >= fmin]
+    assert fav and all(q.side == "YES" for q in fav)
     no = compute_ladder(Config(), mid_yes=0.10, time_to_expiry=LATE_TTE)
-    assert no and any(q.side == "NO" for q in no)
+    favn = [q for q in no if q.price >= fmin]
+    assert favn and all(q.side == "NO" for q in favn)
 
 
 def test_below_min_price_no_favorite_quotes():
@@ -48,10 +50,11 @@ def test_commit_one_side_holds_no():
 
 
 def test_commit_one_side_same_side_ok():
-    # inventory_yes=10, inventory_no=0 → favorite YES allowed; NO lottery also fires
+    fmin = Config().favorite_min_price
     out = compute_ladder(Config(), mid_yes=0.90, time_to_expiry=LATE_TTE,
                          inventory_yes_qty=10)
-    assert out and any(q.side == "YES" for q in out)
+    fav = [q for q in out if q.price >= fmin]
+    assert fav and all(q.side == "YES" for q in fav)
 
 
 def test_flat_size():
