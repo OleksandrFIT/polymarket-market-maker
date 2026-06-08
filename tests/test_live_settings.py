@@ -91,3 +91,11 @@ def test_update_returns_all_effective_keys(tmp_path):
     for k in ALLOWED_KEYS:
         assert k in res
     assert res["flat_size"] == 7
+
+
+def test_lottery_knob_validates(tmp_path):
+    ls = _ls(tmp_path)
+    ls.update("lottery_max_price", 0.30)
+    assert ls.snapshot()["lottery_max_price"] == 0.30
+    with pytest.raises(ValueError):
+        ls.update("lottery_max_price", 0.9)  # > 0.49 range

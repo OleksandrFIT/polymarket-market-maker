@@ -42,6 +42,12 @@ class Config:
     favorite_ladder_levels: int = 3        # one-sided bids per tick
     min_time_to_expiry_sec: float = 5.0    # below this → no quotes
 
+    # ── Phase-17 cheap-tail lottery leg (competitor parity) ──
+    lottery_max_price: float = 0.40    # buy underdog only if its price <= this
+    lottery_cap_usd: float = 3.0       # separate small $ budget for the lottery leg
+    lottery_size: int = 5              # shares per lottery bid (0 disables)
+    lottery_levels: int = 2            # cheap-tail lottery bids per tick (0 disables)
+
     # ── Phase-12 Binance velocity signal ──
     velocity_short_lookback_sec: float = 30.0   # for directional skew gating
     velocity_long_lookback_sec: float = 60.0    # for conviction confirmation

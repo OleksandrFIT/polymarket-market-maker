@@ -673,7 +673,8 @@ async function setRisk() {
 const SETTING_KEYS = [
   "per_market_cap_usd","favorite_min_price","max_entry_price","entry_start_frac",
   "flat_size","rise_tolerance_cents","favorite_ladder_levels",
-  "velocity_confirm_threshold","min_time_to_expiry_sec"
+  "velocity_confirm_threshold","min_time_to_expiry_sec",
+  "lottery_max_price","lottery_cap_usd","lottery_size","lottery_levels"
 ];
 async function loadSettings() {
   try {

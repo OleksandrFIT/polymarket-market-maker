@@ -50,7 +50,7 @@ class TestConfig:
         with pytest.raises(FrozenInstanceError):
             c.bankroll_usd = 999  # type: ignore[misc]
 
-    def test_phase16_defaults(self):
+    def test_phase17_defaults(self):
         c = Config()
         assert c.favorite_min_price == 0.85
         assert c.max_entry_price == 0.97
@@ -62,6 +62,10 @@ class TestConfig:
         assert c.rise_tolerance_cents == 0.01
         assert c.favorite_ladder_levels == 3
         assert c.min_time_to_expiry_sec == 5.0
+        assert c.lottery_max_price == 0.40
+        assert c.lottery_cap_usd == 3.0
+        assert c.lottery_size == 5
+        assert c.lottery_levels == 2
 
 
 class TestPolyCreds:
