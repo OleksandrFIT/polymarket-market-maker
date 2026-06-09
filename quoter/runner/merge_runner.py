@@ -111,13 +111,23 @@ class MergeRunner:
         return m, _mid(by, bn)
 
     async def trade_window(self, m, mid: float) -> None:
-        """Post both legs for this window; hold pairs; cancel unfilled at the end.
-        Breaks early (cancelling its own resting orders) on FORCE STOP."""
+        """Post both legs for this window; HOLD matched pairs to on-chain
+        resolution (redeem manually for now — no merge step); cancel unfilled at
+        the end. Breaks early (cancelling its own resting orders) on FORCE STOP."""
         tte = m.time_remaining()
         quotes = compute_ladder(self.cfg, mid, tte,
                                 inventory_yes_qty=0, inventory_no_qty=0,
                                 inventory_yes_cost=0.0, inventory_no_cost=0.0)
         if not quotes:
+            return
+        # HARD CAP enforced HERE. compute_ladder sees zero inventory by design (we
+        # post once per window and never re-quote), so its capital/balance gates
+        # cannot fire — the runner is the cap authority. Skip the window if the
+        # single post's intended spend would exceed per_market_cap_usd.
+        intended = sum(q.price * q.size for q in quotes)
+        if intended > self.cfg.per_market_cap_usd + 1e-9:
+            log.warning("runner_over_cap_skip", slug=m.slug,
+                        intended=round(intended, 2), cap=self.cfg.per_market_cap_usd)
             return
         self._traded_windows.add(m.open_ts)
         self.state.windows_traded += 1
@@ -134,15 +144,21 @@ class MergeRunner:
                 oids.append(r["order_id"])
         log.info("runner_posted", slug=m.slug, legs=len(oids))
 
-        # Poll until window end or FORCE STOP.
+        # Poll until window end or FORCE STOP. The flag is checked every 1s for a
+        # responsive emergency stop; shares are re-read every POLL_SEC. We do NOT
+        # drain force_stop here — run_forever drains it and runs cancel_all as a
+        # backstop (defense-in-depth); draining here would break that.
+        secs = 0
         while m.time_remaining() > END_BUFFER_SEC:
             if self.state.force_stop_requested:
                 log.info("runner_force_break", slug=m.slug)
                 break
-            await asyncio.sleep(POLL_SEC)
-            yq, nq = self._shares(m.yes_token), self._shares(m.no_token)
-            self.state.pairs_caught = min(yq, nq)
-            self.state.naked_shares = abs(yq - nq)
+            await asyncio.sleep(1)
+            secs += 1
+            if secs % POLL_SEC == 0:
+                yq, nq = self._shares(m.yes_token), self._shares(m.no_token)
+                self.state.pairs_caught = min(yq, nq)
+                self.state.naked_shares = abs(yq - nq)
 
         # Cancel any unfilled resting legs (graceful end or force break).
         if oids:

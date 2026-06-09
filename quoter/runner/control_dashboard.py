@@ -7,6 +7,7 @@ the single source of truth the buttons mutate.
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 from aiohttp import web
@@ -75,9 +76,7 @@ def make_control_app(state: TradingState, runner=None) -> web.Application:
         return web.Response(text=HTML, content_type="text/html")
 
     async def status(_req):
-        import asyncio
         cash = open_orders = None
-        win = ""
         if runner is not None:
             try:
                 cash = await asyncio.to_thread(runner.collateral_usd)
