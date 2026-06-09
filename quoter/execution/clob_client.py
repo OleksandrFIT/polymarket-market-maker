@@ -1,10 +1,13 @@
-"""Polymarket CLOB API wrapper — signing + posting.
+"""Polymarket CLOB **V2** API wrapper — signing + posting.
 
-Uses ``py-clob-client`` for EIP-712 signing (in thread pool — CPU-bound),
-but raw ``httpx`` for actually posting the signed order over HTTP/2 (async).
+Migrated to ``py-clob-client-v2`` after the CLOB V2 cutover (2026-04-28), which
+retired the V1 SDKs (orders signed with the old EIP-712 v1 struct are rejected
+with "invalid order version"). V2 removes ``feeRateBps`` from the signed order
+(maker/limit orders are fee-free; fees are set by the operator at match time).
 
-This split avoids the synchronous bottleneck of ``client.post_order()``
-which blocks the event loop on the network round-trip.
+All HTTP/signing runs inside ``asyncio.to_thread`` to avoid blocking the loop.
+The public method surface (``place_limit``/``cancel_orders``/``cancel_all``/
+``get_open_orders``) is unchanged so ``LiveExecutor`` needs no edits.
 """
 
 from __future__ import annotations
@@ -19,11 +22,9 @@ log = get_logger("clob_client")
 
 
 class ClobOps:
-    """Thin wrapper around py-clob-client for live order operations.
+    """Thin async wrapper around py-clob-client-v2 for live order operations.
 
     NOT used in shadow / paper mode — only when MODE=live.
-    All HTTP/signing happens inside ``asyncio.to_thread`` to avoid
-    blocking the event loop.
     """
 
     def __init__(self, creds: PolyCreds, host: str = "https://clob.polymarket.com"):
@@ -35,15 +36,14 @@ class ClobOps:
         if self._client is not None:
             return self._client
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds
+            from py_clob_client_v2 import ClobClient, ApiCreds
         except ImportError as e:
-            raise RuntimeError("py-clob-client not installed") from e
+            raise RuntimeError("py-clob-client-v2 not installed") from e
 
         self._client = ClobClient(
-            host=self._host,
+            self._host,
+            137,
             key=self._creds.private_key,
-            chain_id=137,
             creds=ApiCreds(
                 api_key=self._creds.api_key,
                 api_secret=self._creds.api_secret,
@@ -65,19 +65,18 @@ class ClobOps:
         side: str = "BUY",
         post_only: bool = True,
     ) -> dict | None:
-        """Place a GTC limit order. Returns ``{"order_id", "status"}`` or None."""
+        """Place a GTC limit order (V2). Returns ``{"order_id", "status"}`` or None."""
         client = self._build()
         try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
-            from py_clob_client.order_builder.constants import BUY, SELL
+            from py_clob_client_v2 import OrderArgsV2, OrderType, Side
         except ImportError:
             return None
 
-        args = OrderArgs(
+        args = OrderArgsV2(
             token_id=token_id,
             price=float(price),
             size=int(size),
-            side=BUY if side == "BUY" else SELL,
+            side=Side.BUY if side == "BUY" else Side.SELL,
         )
         try:
             signed = await asyncio.to_thread(client.create_order, args)
@@ -93,39 +92,30 @@ class ClobOps:
                 return None
             return {
                 "order_id": resp.get("orderID") or resp.get("orderId"),
-                "status": "open",
-                "transaction_hashes": resp.get("transactionHashes", []),
+                "status": resp.get("status", "live"),
             }
         except Exception as e:
             log.warning("place_exception", error=str(e), token=token_id[:14])
             return None
 
     async def cancel_order(self, order_id: str) -> bool:
-        client = self._build()
-        try:
-            resp = await asyncio.to_thread(client.cancel, order_id)
-            return bool(resp)
-        except Exception as e:
-            log.warning("cancel_exception", error=str(e), order_id=order_id[:14])
-            return False
+        """Cancel a single order by hash."""
+        n = await self.cancel_orders([order_id])
+        return n > 0
 
     async def cancel_orders(self, order_ids: list[str]) -> int:
-        """Batch cancel. Uses ``cancel_orders`` if available, else gathers."""
+        """Batch cancel by order hashes (V2 ``cancel_orders`` takes a list)."""
         if not order_ids:
             return 0
         client = self._build()
-        if hasattr(client, "cancel_orders"):
-            try:
-                await asyncio.to_thread(client.cancel_orders, order_ids)
-                return len(order_ids)
-            except Exception as e:
-                log.warning("batch_cancel_failed", error=str(e), n=len(order_ids))
-        # Fallback: gather of single cancels
-        results = await asyncio.gather(
-            *(self.cancel_order(oid) for oid in order_ids),
-            return_exceptions=True,
-        )
-        return sum(1 for r in results if r is True)
+        try:
+            resp = await asyncio.to_thread(client.cancel_orders, order_ids)
+            if isinstance(resp, dict):
+                return len(resp.get("canceled", []) or [])
+            return len(order_ids)
+        except Exception as e:
+            log.warning("batch_cancel_failed", error=str(e), n=len(order_ids))
+            return 0
 
     async def cancel_all(self) -> int:
         """Wipe all open orders for this account. Used at startup recovery."""
@@ -142,7 +132,7 @@ class ClobOps:
     async def get_open_orders(self) -> list[dict]:
         client = self._build()
         try:
-            res = await asyncio.to_thread(client.get_orders)
+            res = await asyncio.to_thread(client.get_open_orders)
             if isinstance(res, dict):
                 return list(res.get("data", []))
             return list(res) if res else []
