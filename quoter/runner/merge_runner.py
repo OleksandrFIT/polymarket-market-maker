@@ -21,6 +21,7 @@ from quoter.execution.clob_client import ClobOps
 from quoter.ops.logger import get_logger
 from quoter.runner.trading_state import TradingState
 from quoter.runner.requote_planner import RestingOrder, plan_requote
+from quoter.runner.local_inventory import LocalInventory
 
 log = get_logger("merge_runner")
 
@@ -226,12 +227,14 @@ class MergeRunner:
         coll_start = self.collateral_usd()
         resting: dict[str, RestingOrder | None] = {"YES": None, "NO": None}
         placed_at: dict[str, float] = {"YES": 0.0, "NO": 0.0}
-        # per-side cost basis + the price of our last post on each side, so the
-        # edge gate knows what we actually PAID on a held leg (fix for the
-        # losing-pair bug). Updated from inventory deltas at our last quoted price.
-        side_cost: dict[str, float] = {"YES": 0.0, "NO": 0.0}
         last_px: dict[str, float] = {"YES": 0.0, "NO": 0.0}
-        prev_inv: dict[str, int] = {"YES": 0, "NO": 0}
+        # Optimistic local inventory: credit a fill the MOMENT our order vanishes
+        # uncancelled, because the on-chain share read lags fills by seconds while
+        # this loop runs every ~2s. Trusting the lagging read re-posted sides we
+        # had already filled and over-bought one leg (15 vs target 5, naked 9 vs
+        # cap 5). The chain read only ever RAISES the local count (partials),
+        # never lowers it. Also carries the cost basis for the edge gate.
+        local = LocalInventory()
 
         try:
             while m.time_remaining() > END_BUFFER_SEC:
@@ -250,41 +253,39 @@ class MergeRunner:
                 if not yes_bid or not no_bid:
                     await asyncio.sleep(REQUOTE_SEC)
                     continue
-                inv_yes, inv_no = self._shares(m.yes_token), self._shares(m.no_token)
+                chain_yes, chain_no = self._shares(m.yes_token), self._shares(m.no_token)
                 coll_now = self.collateral_usd()
                 now = monotonic()
 
-                # Track per-side cost basis from inventory deltas (a fill lands at
-                # our last quoted price on that side); scale down on a sell.
-                for s, inv_now in (("YES", inv_yes), ("NO", inv_no)):
-                    d = inv_now - prev_inv[s]
-                    if d > 0:
-                        px = last_px[s] or (yes_bid if s == "YES" else no_bid)
-                        side_cost[s] += d * px
-                    elif d < 0 and prev_inv[s] > 0:
-                        side_cost[s] *= inv_now / prev_inv[s]
-                    prev_inv[s] = inv_now
-
-                # Reconcile tracked orders with reality, but only DROP an order
-                # that's been gone for > one cadence — a just-placed order can be
-                # missing from a stale get_open_orders read (avoids double-posting).
+                # Reconcile our tracked orders. An order that vanished from the
+                # book WITHOUT us cancelling it has FILLED — credit it to local
+                # inventory immediately, don't wait for the lagging chain read.
+                # Grace of one cadence guards a just-placed order that's missing
+                # from a stale get_open_orders read (avoids double-posting).
                 open_ids = self._open_order_ids()
                 for side in ("YES", "NO"):
                     ro = resting[side]
                     if ro is not None and ro.order_id not in open_ids and (now - placed_at[side]) > REQUOTE_SEC:
+                        local.credit_fill(side, ro.size, ro.price)
                         resting[side] = None
+                # Backstop: raise local inventory to the chain read when it's
+                # higher (partial fills, or a fill we missed crediting); never
+                # lower it — a low read is lag, and under-counting caused the over-buy.
+                local.reconcile_up("YES", chain_yes, last_px["YES"] or yes_bid)
+                local.reconcile_up("NO", chain_no, last_px["NO"] or no_bid)
+                inv_yes, inv_no = local.inv["YES"], local.inv["NO"]
 
                 # FORWARD-LOOKING committed spend: realized (balance-delta OR
-                # cost-basis, whichever larger — fail-safe) PLUS resting value.
+                # local cost-basis, whichever larger — fail-safe) PLUS resting value.
                 spent_bal = (coll_start - coll_now) if (coll_start >= 0 and coll_now >= 0) else 0.0
-                realized = max(spent_bal, side_cost["YES"] + side_cost["NO"])
+                realized = max(spent_bal, local.cost["YES"] + local.cost["NO"])
                 resting_val = sum(ro.price * ro.size for ro in resting.values() if ro is not None)
                 committed = max(0.0, realized) + resting_val
 
                 plan = plan_requote(
                     yes_bid=yes_bid, no_bid=no_bid, yes_ask=yes_ask, no_ask=no_ask,
                     inv_yes=inv_yes, inv_no=inv_no,
-                    yes_cost=side_cost["YES"], no_cost=side_cost["NO"],
+                    yes_cost=local.cost["YES"], no_cost=local.cost["NO"],
                     committed=committed, target_shares=self.target_shares,
                     resting=resting, cfg=self.cfg)
 
@@ -316,7 +317,8 @@ class MergeRunner:
             # from local tracking). Held positions/pairs are untouched.
             await self.cancel_all()
 
-        iy, inn = self._shares(m.yes_token), self._shares(m.no_token)
+        iy = max(self._shares(m.yes_token), local.inv["YES"])
+        inn = max(self._shares(m.no_token), local.inv["NO"])
         self.state.last_event = f"re-quote done: matched={min(iy, inn)} naked={abs(iy - inn)}"
         log.info("runner_requote_done", slug=m.slug, matched=min(iy, inn), naked=abs(iy - inn))
 
