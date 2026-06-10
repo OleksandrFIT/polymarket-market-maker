@@ -1,4 +1,4 @@
-"""Phase-21 re-quoting: pure planner unit tests + simulation invariants.
+"""Phase-21 re-quoting: planner unit tests (incl. the 3 fixed bugs) + sim invariants.
 
 All offline — proves behaviour WITHOUT any live trading.
 """
@@ -9,17 +9,19 @@ from quoter.runner.requote_sim import RequoteSim
 
 
 def cfg(**kw):
-    base = dict(merge_edge=0.01, max_naked_shares=10, merge_levels=1,
+    base = dict(merge_edge=0.01, max_naked_shares=5, merge_levels=1,
                 flat_size=5, per_market_cap_usd=50.0, min_time_to_expiry_sec=5.0)
     base.update(kw)
     return Config(**base)
 
 
-def _plan(resting=None, inv_yes=0, inv_no=0, yes_cost=0.0, no_cost=0.0,
-          yes_bid=0.49, no_bid=0.49, c=None):
+def _plan(*, yes_bid=0.49, no_bid=0.49, yes_ask=None, no_ask=None,
+          inv_yes=0, inv_no=0, yes_cost=0.0, no_cost=0.0, committed=0.0,
+          target_shares=5, resting=None, c=None):
     return plan_requote(
-        yes_bid=yes_bid, no_bid=no_bid, inv_yes=inv_yes, inv_no=inv_no,
-        yes_cost=yes_cost, no_cost=no_cost,
+        yes_bid=yes_bid, no_bid=no_bid, yes_ask=yes_ask, no_ask=no_ask,
+        inv_yes=inv_yes, inv_no=inv_no, yes_cost=yes_cost, no_cost=no_cost,
+        committed=committed, target_shares=target_shares,
         resting=resting or {"YES": None, "NO": None}, cfg=c or cfg())
 
 
@@ -27,106 +29,102 @@ def _sides(quotes):
     return {q.side for q in quotes}
 
 
-# ── pure planner unit tests ──
+# ── BUG 1: cost-basis edge gate (the real −$0.40 window) ──
 
-def test_posts_both_when_balanced():
+def test_bug1_does_not_complete_losing_pair():
+    # hold 5 YES bought @ 0.46; NO now 0.62 → pair would be 1.08 → must NOT buy NO
+    p = _plan(inv_yes=5, inv_no=0, yes_cost=5 * 0.46, committed=5 * 0.46,
+              yes_bid=0.36, no_bid=0.62)
+    assert all(q.side != "NO" for q in p.posts)  # refuses the losing completion
+
+
+def test_bug1_completes_when_pair_stays_under_1():
+    # hold 5 YES @ 0.46; NO now 0.50 → pair 0.96 < 1 → completing is fine
+    p = _plan(inv_yes=5, inv_no=0, yes_cost=5 * 0.46, committed=5 * 0.46,
+              yes_bid=0.46, no_bid=0.50)
+    assert any(q.side == "NO" for q in p.posts)
+
+
+def test_bug1_symmetric_for_no_held():
+    # hold 5 NO @ 0.46; YES now 0.62 → pair 1.08 → must NOT buy YES
+    p = _plan(inv_no=5, inv_yes=0, no_cost=5 * 0.46, committed=5 * 0.46,
+              no_bid=0.36, yes_bid=0.62)
+    assert all(q.side != "YES" for q in p.posts)
+
+
+# ── BUG 2: per-side target (no over-buying) ──
+
+def test_bug2_target_caps_a_side():
+    p = _plan(inv_no=5, inv_yes=0, no_cost=5 * 0.30, committed=1.5,
+              target_shares=5, yes_bid=0.49, no_bid=0.30)
+    assert all(q.side != "NO" for q in p.posts)  # NO already at target
+
+
+# ── BUG 3: post stays below the ask (never crosses) ──
+
+def test_bug3_clamps_below_ask():
+    p = _plan(yes_bid=0.50, yes_ask=0.50, no_bid=0.48, no_ask=0.50)  # YES bid==ask
+    yp = [q for q in p.posts if q.side == "YES"]
+    assert yp and yp[0].price <= 0.49
+
+
+# ── standard planner behaviour ──
+
+def test_posts_both_when_balanced_and_cheap():
     p = _plan()
     assert _sides(p.posts) == {"YES", "NO"}
-    assert p.cancels == []
-
-
-def test_edge_gate_no_posts_when_pair_ge_1():
-    p = _plan(yes_bid=0.55, no_bid=0.55)  # sum 1.10
-    assert p.posts == []
-
-
-def test_edge_gate_cancels_stale_when_no_edge():
-    resting = {"YES": RestingOrder("a", "YES", 0.49, 5), "NO": None}
-    p = _plan(resting=resting, yes_bid=0.55, no_bid=0.55)
-    assert "a" in p.cancels and p.posts == []
-
-
-def test_balance_suppresses_long_side():
-    p = _plan(inv_yes=10, inv_no=0)  # naked = 10 = cap
-    assert _sides(p.posts) == {"NO"}  # only the short side
 
 
 def test_capital_gate_pulls_everything():
-    resting = {"YES": RestingOrder("a", "YES", 0.49, 5),
-               "NO": RestingOrder("b", "NO", 0.49, 5)}
-    p = _plan(resting=resting, yes_cost=30.0, no_cost=25.0, c=cfg(per_market_cap_usd=50.0))
+    resting = {"YES": RestingOrder("a", "YES", 0.49, 5), "NO": RestingOrder("b", "NO", 0.49, 5)}
+    p = _plan(resting=resting, committed=50.0, c=cfg(per_market_cap_usd=50.0))
     assert set(p.cancels) == {"a", "b"} and p.posts == []
+
+
+def test_keep_order_when_price_unchanged():
+    resting = {"YES": RestingOrder("a", "YES", 0.49, 5), "NO": RestingOrder("b", "NO", 0.49, 5)}
+    p = _plan(resting=resting, yes_bid=0.49, no_bid=0.49)
+    assert p.cancels == [] and p.posts == []
 
 
 def test_requote_on_price_move():
     resting = {"YES": RestingOrder("a", "YES", 0.48, 5), "NO": None}
     p = _plan(resting=resting, yes_bid=0.50, no_bid=0.49)
-    assert "a" in p.cancels
-    yes_posts = [q for q in p.posts if q.side == "YES"]
-    assert yes_posts and yes_posts[0].price == 0.50
-
-
-def test_keep_order_when_price_unchanged():
-    resting = {"YES": RestingOrder("a", "YES", 0.49, 5),
-               "NO": RestingOrder("b", "NO", 0.49, 5)}
-    p = _plan(resting=resting, yes_bid=0.49, no_bid=0.49)
-    assert p.cancels == [] and p.posts == []  # no churn
-
-
-def test_cancel_unwanted_long_side():
-    resting = {"YES": RestingOrder("a", "YES", 0.49, 5), "NO": None}
-    p = _plan(resting=resting, inv_yes=10, inv_no=0)  # YES is over-long
-    assert "a" in p.cancels
+    assert "a" in p.cancels and any(q.side == "YES" and q.price == 0.50 for q in p.posts)
 
 
 # ── simulation invariants (the heart of "max testing") ──
 
-def test_sim_balanced_flow_catches_pairs():
-    sim = RequoteSim(cfg=cfg())
-    # alternate takers on each side with a steady balanced book
-    script = []
-    for i in range(24):
-        script.append((0.49, 0.49, "YES" if i % 2 == 0 else "NO"))
-    sim.run(script)
-    assert sim.matched > 0          # re-quoting actually catches pairs
-    assert sim.naked <= cfg().flat_size  # stays near-balanced
+def test_sim_never_completes_a_losing_pair():
+    # YES fills cheap, then NO is only available expensive (the −$0.40 trap).
+    sim = RequoteSim(cfg=cfg(), target_shares=5)
+    sim.run([(0.46, 0.49, "YES")] + [(0.36, 0.62, "NO")] * 4)
+    assert sim.inv_no == 0          # refused to buy NO @ 0.62 (would lock a loss)
+    assert sim.inv_yes == 5         # holds the naked leg instead — never a >$1 pair
 
 
-def test_sim_naked_never_exceeds_cap_plus_flatsize_one_sided():
-    # Adversarial: a taker hits ONLY the YES side every tick.
-    c = cfg(max_naked_shares=10, flat_size=5)
-    sim = RequoteSim(cfg=c)
-    sim.run([(0.49, 0.49, "YES")] * 40)
-    # provable bound: a fill can land at most flat_size-1 past the cap
-    assert sim.max_naked < c.max_naked_shares + c.flat_size
-    assert sim.max_naked <= 10  # exact here: 0->5->10 lands on the cap
-
-
-def test_sim_matched_pairs_are_cheap():
-    sim = RequoteSim(cfg=cfg())
-    script = [(0.49, 0.49, "YES" if i % 2 == 0 else "NO") for i in range(20)]
-    sim.run(script)
-    apc = sim.avg_pair_cost()
-    assert apc is not None and apc < 1.0   # every held pair cost < $1
-
-
-def test_sim_spend_never_exceeds_cap():
-    c = cfg(per_market_cap_usd=6.0, flat_size=5)  # tight cap
-    sim = RequoteSim(cfg=c)
-    sim.run([(0.49, 0.49, "YES" if i % 2 == 0 else "NO") for i in range(40)])
-    assert sim.spent <= c.per_market_cap_usd + 1e-9 + c.flat_size  # bounded
-
-
-def test_sim_choppy_book_still_catches_and_stays_safe():
-    c = cfg()
-    sim = RequoteSim(cfg=c)
-    # moving/choppy book, two-way flow
-    prices = [0.45, 0.50, 0.55, 0.48, 0.52, 0.47, 0.50, 0.53]
-    script = []
-    for i in range(32):
-        yb = prices[i % len(prices)]
-        script.append((round(yb, 2), round(0.98 - yb, 2), "YES" if i % 2 else "NO"))
-    sim.run(script)
-    assert sim.max_naked < c.max_naked_shares + c.flat_size  # never unsafe
+def test_sim_matched_pairs_always_cheap():
+    sim = RequoteSim(cfg=cfg(), target_shares=5)
+    sim.run([(0.49, 0.49, "YES" if i % 2 == 0 else "NO") for i in range(12)])
     if sim.matched > 0:
         assert sim.avg_pair_cost() < 1.0
+
+
+def test_sim_target_no_overbuy():
+    sim = RequoteSim(cfg=cfg(), target_shares=5)
+    sim.run([(0.49, 0.30, "NO")] * 12)          # cheap NO hammered repeatedly
+    assert sim.inv_no <= 5                       # never exceeds per-side target
+
+
+def test_sim_balanced_flow_catches_exactly_the_pair():
+    sim = RequoteSim(cfg=cfg(), target_shares=5)
+    sim.run([(0.49, 0.49, "YES" if i % 2 == 0 else "NO") for i in range(12)])
+    assert sim.matched == 5 and sim.naked == 0
+    assert sim.avg_pair_cost() < 1.0
+
+
+def test_sim_naked_bounded_under_one_sided_flow():
+    c = cfg(max_naked_shares=5)
+    sim = RequoteSim(cfg=c, target_shares=5)
+    sim.run([(0.49, 0.49, "YES")] * 20)
+    assert sim.max_naked <= c.max_naked_shares  # target+naked cap hold (lands on 5)

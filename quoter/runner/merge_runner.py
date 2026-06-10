@@ -49,11 +49,13 @@ def _mid(by: dict, bn: dict) -> float | None:
 
 class MergeRunner:
     def __init__(self, creds: PolyCreds, cfg: Config, state: TradingState,
-                 requote: bool = False):
+                 requote: bool = False, target_shares: int | None = None):
         self.creds = creds
         self.cfg = cfg
         self.state = state
         self.requote = requote
+        # per-side target for re-quoting (default = flat_size → one pair/window)
+        self.target_shares = target_shares if target_shares else cfg.flat_size
         self.clob = ClobOps(creds)
         self._rc = None  # lazy read client (py_clob_client_v2)
         self._traded_windows: set[int] = set()
@@ -224,6 +226,12 @@ class MergeRunner:
         coll_start = self.collateral_usd()
         resting: dict[str, RestingOrder | None] = {"YES": None, "NO": None}
         placed_at: dict[str, float] = {"YES": 0.0, "NO": 0.0}
+        # per-side cost basis + the price of our last post on each side, so the
+        # edge gate knows what we actually PAID on a held leg (fix for the
+        # losing-pair bug). Updated from inventory deltas at our last quoted price.
+        side_cost: dict[str, float] = {"YES": 0.0, "NO": 0.0}
+        last_px: dict[str, float] = {"YES": 0.0, "NO": 0.0}
+        prev_inv: dict[str, int] = {"YES": 0, "NO": 0}
 
         try:
             while m.time_remaining() > END_BUFFER_SEC:
@@ -238,12 +246,24 @@ class MergeRunner:
                     await asyncio.sleep(REQUOTE_SEC)
                     continue
                 yes_bid, no_bid = _best(by, "bids"), _best(bn, "bids")
+                yes_ask, no_ask = _best(by, "asks"), _best(bn, "asks")
                 if not yes_bid or not no_bid:
                     await asyncio.sleep(REQUOTE_SEC)
                     continue
                 inv_yes, inv_no = self._shares(m.yes_token), self._shares(m.no_token)
                 coll_now = self.collateral_usd()
                 now = monotonic()
+
+                # Track per-side cost basis from inventory deltas (a fill lands at
+                # our last quoted price on that side); scale down on a sell.
+                for s, inv_now in (("YES", inv_yes), ("NO", inv_no)):
+                    d = inv_now - prev_inv[s]
+                    if d > 0:
+                        px = last_px[s] or (yes_bid if s == "YES" else no_bid)
+                        side_cost[s] += d * px
+                    elif d < 0 and prev_inv[s] > 0:
+                        side_cost[s] *= inv_now / prev_inv[s]
+                    prev_inv[s] = inv_now
 
                 # Reconcile tracked orders with reality, but only DROP an order
                 # that's been gone for > one cadence — a just-placed order can be
@@ -254,18 +274,19 @@ class MergeRunner:
                     if ro is not None and ro.order_id not in open_ids and (now - placed_at[side]) > REQUOTE_SEC:
                         resting[side] = None
 
-                # FORWARD-LOOKING spend: realized (balance-delta OR inventory est,
-                # whichever larger — fail-safe) PLUS the value of orders still
-                # resting. We only post if committed + new_post stays within the
-                # cap, so realized spend can never exceed per_market_cap_usd.
+                # FORWARD-LOOKING committed spend: realized (balance-delta OR
+                # cost-basis, whichever larger — fail-safe) PLUS resting value.
                 spent_bal = (coll_start - coll_now) if (coll_start >= 0 and coll_now >= 0) else 0.0
-                spent_inv = inv_yes * yes_bid + inv_no * no_bid
+                realized = max(spent_bal, side_cost["YES"] + side_cost["NO"])
                 resting_val = sum(ro.price * ro.size for ro in resting.values() if ro is not None)
-                committed = max(0.0, spent_bal, spent_inv) + resting_val
+                committed = max(0.0, realized) + resting_val
 
                 plan = plan_requote(
-                    yes_bid=yes_bid, no_bid=no_bid, inv_yes=inv_yes, inv_no=inv_no,
-                    yes_cost=committed, no_cost=0.0, resting=resting, cfg=self.cfg)
+                    yes_bid=yes_bid, no_bid=no_bid, yes_ask=yes_ask, no_ask=no_ask,
+                    inv_yes=inv_yes, inv_no=inv_no,
+                    yes_cost=side_cost["YES"], no_cost=side_cost["NO"],
+                    committed=committed, target_shares=self.target_shares,
+                    resting=resting, cfg=self.cfg)
 
                 # batch cancels (fewer requests)
                 if plan.cancels:
@@ -284,6 +305,7 @@ class MergeRunner:
                         if r and r.get("order_id"):
                             resting[q.side] = RestingOrder(r["order_id"], q.side, q.price, q.size)
                             placed_at[q.side] = now
+                            last_px[q.side] = q.price
 
                 self.state.pairs_caught = min(inv_yes, inv_no)
                 self.state.naked_shares = abs(inv_yes - inv_no)
