@@ -19,6 +19,7 @@ from quoter.strategy.ladder import compute_ladder
 from quoter.execution.clob_client import ClobOps
 from quoter.ops.logger import get_logger
 from quoter.runner.trading_state import TradingState
+from quoter.runner.requote_planner import RestingOrder, plan_requote
 
 log = get_logger("merge_runner")
 
@@ -27,6 +28,7 @@ BALANCED = (0.35, 0.65)
 END_BUFFER_SEC = 12   # stop polling / cancel unfilled this many sec before expiry
 POLL_SEC = 8
 LOOP_SEC = 6
+REQUOTE_SEC = 2       # re-quote cadence (read book + adjust orders this often)
 
 
 def _best(book: dict, side: str) -> float | None:
@@ -45,10 +47,12 @@ def _mid(by: dict, bn: dict) -> float | None:
 
 
 class MergeRunner:
-    def __init__(self, creds: PolyCreds, cfg: Config, state: TradingState):
+    def __init__(self, creds: PolyCreds, cfg: Config, state: TradingState,
+                 requote: bool = False):
         self.creds = creds
         self.cfg = cfg
         self.state = state
+        self.requote = requote
         self.clob = ClobOps(creds)
         self._rc = None  # lazy read client (py_clob_client_v2)
         self._traded_windows: set[int] = set()
@@ -89,6 +93,18 @@ class MergeRunner:
             return int(b.get("balance", 0)) // 1_000_000
         except Exception:
             return 0
+
+    def _open_order_ids(self) -> set[str]:
+        try:
+            orders = self._read_client().get_open_orders() or []
+        except Exception:
+            return set()
+        ids = set()
+        for o in orders:
+            oid = o.get("id") or o.get("orderID") or o.get("order_id")
+            if oid:
+                ids.add(oid)
+        return ids
 
     async def cancel_all(self) -> int:
         try:
@@ -181,10 +197,87 @@ class MergeRunner:
                         fresh_min_sec=FRESH_MIN_SEC, balanced=BALANCED,
                         already_traded=m.open_ts in self._traded_windows)
                     if enter:
-                        await self.trade_window(m, mid)
+                        if self.requote:
+                            await self._requote_window(m, mid)
+                        else:
+                            await self.trade_window(m, mid)
             except Exception as e:
                 log.warning("runner_loop_err", error=str(e))
             await asyncio.sleep(LOOP_SEC)
+
+    async def _requote_window(self, m, mid_at_entry: float) -> None:
+        """LIVE continuous re-quoting: keep top-of-book on the side(s) we need,
+        using the tested ``plan_requote`` brain. Spend is tracked via the
+        collateral delta; matched pairs ride to resolution. Same hard caps + STOP.
+
+        NOTE: this is the live-execution path for re-quoting — the brain is unit/
+        simulation-tested; this glue is validated operator-gated (live), never run
+        without an explicit START.
+        """
+        self._traded_windows.add(m.open_ts)
+        self.state.windows_traded += 1
+        self.state.last_window = m.slug
+        self.state.last_event = f"re-quoting {m.slug} (mid {mid_at_entry:.2f})"
+        log.info("runner_requote_enter", slug=m.slug, mid=round(mid_at_entry, 3))
+
+        coll_start = self.collateral_usd()
+        resting: dict[str, RestingOrder | None] = {"YES": None, "NO": None}
+
+        while m.time_remaining() > END_BUFFER_SEC:
+            if self.state.force_stop_requested:
+                log.info("runner_requote_force_break", slug=m.slug)
+                break
+            try:
+                async with httpx.AsyncClient(timeout=6) as cl:
+                    by = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.yes_token})).json()
+                    bn = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.no_token})).json()
+            except Exception:
+                await asyncio.sleep(REQUOTE_SEC)
+                continue
+            yes_bid, no_bid = _best(by, "bids"), _best(bn, "bids")
+            if not yes_bid or not no_bid:
+                await asyncio.sleep(REQUOTE_SEC)
+                continue
+            inv_yes, inv_no = self._shares(m.yes_token), self._shares(m.no_token)
+            coll_now = self.collateral_usd()
+            # Spend for the capital gate = the LARGER of the balance delta and an
+            # inventory-based estimate, so the cap is enforced even if a balance
+            # read fails (returns -1) — fail-safe toward stopping, never spending.
+            spent_bal = (coll_start - coll_now) if (coll_start >= 0 and coll_now >= 0) else 0.0
+            spent_inv = inv_yes * yes_bid + inv_no * no_bid
+            spent = max(0.0, spent_bal, spent_inv)
+            # reconcile our tracked orders with reality (filled/cancelled drop out)
+            open_ids = self._open_order_ids()
+            for side in ("YES", "NO"):
+                ro = resting[side]
+                if ro is not None and ro.order_id not in open_ids:
+                    resting[side] = None
+            plan = plan_requote(
+                yes_bid=yes_bid, no_bid=no_bid, inv_yes=inv_yes, inv_no=inv_no,
+                yes_cost=spent, no_cost=0.0, resting=resting, cfg=self.cfg)
+            for cid in plan.cancels:
+                await self.clob.cancel_orders([cid])
+                for s in ("YES", "NO"):
+                    if resting[s] is not None and resting[s].order_id == cid:
+                        resting[s] = None
+            for q in plan.posts:
+                tok = m.yes_token if q.side == "YES" else m.no_token
+                r = await self.clob.place_limit(token_id=tok, price=q.price, size=q.size,
+                                                side="BUY", post_only=True)
+                if r and r.get("order_id"):
+                    resting[q.side] = RestingOrder(r["order_id"], q.side, q.price, q.size)
+            self.state.pairs_caught = min(inv_yes, inv_no)
+            self.state.naked_shares = abs(inv_yes - inv_no)
+            await asyncio.sleep(REQUOTE_SEC)
+
+        # window end / force break: cancel any of our still-resting orders
+        for side in ("YES", "NO"):
+            ro = resting[side]
+            if ro is not None:
+                await self.clob.cancel_orders([ro.order_id])
+        iy, inn = self._shares(m.yes_token), self._shares(m.no_token)
+        self.state.last_event = f"re-quote done: matched={min(iy, inn)} naked={abs(iy - inn)}"
+        log.info("runner_requote_done", slug=m.slug, matched=min(iy, inn), naked=abs(iy - inn))
 
     def shutdown(self) -> None:
         self._shutdown = True

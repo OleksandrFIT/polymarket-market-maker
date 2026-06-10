@@ -23,11 +23,14 @@ from quoter.runner.trading_state import TradingState
 from quoter.runner.merge_runner import MergeRunner
 from quoter.runner.control_dashboard import make_control_app
 
-# Hard caps for the controlled live run (BTC-only, small size).
+# Hard caps for the controlled live run — MINIMUM size (BTC-only):
+# 5 shares/leg is Polymarket's floor → ~$5/window, worst naked ~$2.50.
 CFG = Config(
-    merge_edge=0.01, max_naked_shares=10, merge_levels=1,
-    flat_size=10, per_market_cap_usd=12.0, min_time_to_expiry_sec=5.0,
+    merge_edge=0.01, max_naked_shares=5, merge_levels=1,
+    flat_size=5, per_market_cap_usd=6.0, min_time_to_expiry_sec=5.0,
 )
+# Use continuous re-quoting (active two-sided market making) when trading.
+REQUOTE = True
 
 
 async def main() -> None:
@@ -35,7 +38,7 @@ async def main() -> None:
     log = get_logger("run_control")
     creds = PolyCreds.from_env()
     state = TradingState()  # STOPPED by default
-    runner = MergeRunner(creds, CFG, state)
+    runner = MergeRunner(creds, CFG, state, requote=REQUOTE)
     app = make_control_app(state, runner)
 
     apprunner = web.AppRunner(app)
