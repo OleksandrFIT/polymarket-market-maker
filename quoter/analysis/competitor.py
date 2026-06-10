@@ -1,0 +1,74 @@
+"""Pure reconstruction of a competitor's per-window P&L from his trades.
+
+No I/O. Given his BUY trades for one BTC 5m window and the window's winning side,
+split his realized P&L into the HEDGE edge (matched pairs bought < $1) and the
+NAKED-leg P&L (the unmatched side, paid off 1/0 at resolution). The whole point is
+to see whether the hedge edge survives the naked legs. Assumes hold-to-resolution
+(competitor sells ~0%), so resolution payout (1/0) equals his realized value.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass
+class Trade:
+    outcome: str   # "Up" | "Down"
+    size: float
+    price: float
+
+
+@dataclass
+class WindowResult:
+    window_id: str
+    up_shares: float
+    up_avg: float
+    down_shares: float
+    down_avg: float
+    matched: float
+    pair_cost: float
+    naked_shares: float
+    naked_side: str | None
+    naked_avg: float
+    winning_side: str
+    pair_pnl: float
+    naked_pnl: float
+    net: float
+    spend: float
+
+
+def reconstruct_window(window_id: str, trades: list[Trade], winning_side: str) -> WindowResult:
+    """Split one window's P&L into hedge edge + naked-leg P&L."""
+    up_sz = sum(t.size for t in trades if t.outcome == "Up")
+    up_cost = sum(t.size * t.price for t in trades if t.outcome == "Up")
+    dn_sz = sum(t.size for t in trades if t.outcome == "Down")
+    dn_cost = sum(t.size * t.price for t in trades if t.outcome == "Down")
+    up_avg = up_cost / up_sz if up_sz else 0.0
+    dn_avg = dn_cost / dn_sz if dn_sz else 0.0
+
+    matched = min(up_sz, dn_sz)
+    pair_cost = (up_avg + dn_avg) if (up_sz and dn_sz) else 0.0
+    pair_pnl = matched * (1.0 - pair_cost) if matched > 0 else 0.0
+
+    naked_shares = abs(up_sz - dn_sz)
+    if up_sz > dn_sz:
+        naked_side, naked_avg = "Up", up_avg
+    elif dn_sz > up_sz:
+        naked_side, naked_avg = "Down", dn_avg
+    else:
+        naked_side, naked_avg = None, 0.0
+    payout = 1.0 if naked_side == winning_side else 0.0
+    naked_pnl = naked_shares * (payout - naked_avg) if naked_side else 0.0
+
+    return WindowResult(
+        window_id=window_id, up_shares=up_sz, up_avg=up_avg,
+        down_shares=dn_sz, down_avg=dn_avg, matched=matched, pair_cost=pair_cost,
+        naked_shares=naked_shares, naked_side=naked_side, naked_avg=naked_avg,
+        winning_side=winning_side, pair_pnl=pair_pnl, naked_pnl=naked_pnl,
+        net=pair_pnl + naked_pnl, spend=up_cost + dn_cost,
+    )
+
+
+def aggregate(results):  # full implementation added in Task 2
+    raise NotImplementedError("aggregate is implemented in Task 2")
