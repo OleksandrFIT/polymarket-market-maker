@@ -107,6 +107,7 @@ def aggregate(results: list[WindowResult]) -> Report:
     tot_net = tot_pair + tot_naked
     pct_pos = 100.0 * sum(1 for r in results if r.net > 0) / n
     tot_spend = sum(r.spend for r in results)
+    # gross shares bought per window (his volume/scale), matched counted both sides — intentional
     avg_size = sum(r.up_shares + r.down_shares for r in results) / n
 
     if tot_net <= 0:

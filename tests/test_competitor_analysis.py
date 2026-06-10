@@ -78,7 +78,7 @@ def test_aggregate_dont_build_when_pair_edge_negative():
     rep = aggregate(rs)
     assert rep.total_pair_pnl <= 0
     assert rep.total_net > 0
-    assert rep.verdict.startswith("DON'T BUILD")
+    assert rep.verdict == "DON'T BUILD (net positive only via naked luck)"
 
 
 def test_aggregate_empty():
