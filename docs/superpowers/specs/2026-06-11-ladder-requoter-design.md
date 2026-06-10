@@ -24,9 +24,14 @@ naked-cap, never accumulate directional size (the competitor's losing −$2,226 
 
 ## Key decisions (from brainstorm)
 
-1. **Deep STATIC ladder** — rung prices anchored at window-entry mid, left in place (NOT
-   chasing top-of-book), so price dipping into a low rung fills it cheap. Drift is covered
-   by the naked-cap.
+1. **Ladder anchor is a config TOGGLE** (`ladder_anchor`), so we don't have to guess
+   static-vs-chase — the same rung-laying code runs both and we A/B them live:
+   - `"entry"` (default, start here) — rungs anchored at window-entry mid, left static, so a
+     price dip into a low rung fills it cheap (catches dips; drift covered by the naked-cap).
+   - `"book"` — rungs anchored to the CURRENT best bid each tick (a chasing ladder: steady
+     fills near fair, catches only fast dips). This is the comparison baseline.
+   The first small live run measures whether `"entry"` drops our avg pair cost below the
+   ~$0.95 a top-of-book join gives; if static is poorly anchored live, flip to `"book"`.
 2. **Naked handling — cap + pull rungs:** when `|naked| ≥ naked_cap`, cancel ALL rungs on
    the heavier side (stop buying the crashing side); keep the opposite side's rungs to
    complete pairs; hold the cheap naked leg to resolution. No taker-rebalance in v1 (YAGNI).
@@ -59,11 +64,15 @@ plan_ladder(*, yes_bid, no_bid, yes_ask, no_ask, entry_mid,
 
 Per tick:
 1. **Capital gate:** if `committed >= cfg.per_window_cap` → cancel all resting, return.
-2. **Static rung prices** from `entry_mid` (δ = `cfg.merge_edge` / 2):
-   - YES top = `entry_mid − δ`; rungs = `top, top − spacing, …` × `cfg.rungs`.
-   - NO  top = `(1 − entry_mid) − δ`; same.
+2. **Rung prices** from the anchor selected by `cfg.ladder_anchor` (δ = `cfg.merge_edge` / 2):
+   - anchor: `"entry"` → `anchor_yes = entry_mid`, `anchor_no = 1 − entry_mid` (static);
+     `"book"` → `anchor_yes = yes_bid`, `anchor_no = no_bid` (chase current bid).
+   - YES top = `anchor_yes − δ`; rungs = `top, top − spacing, …` × `cfg.rungs`.
+   - NO  top = `anchor_no − δ`; same.
    - Each rung clamped to `0.01 ≤ p` and `p ≤ ask − 0.01` (never cross). Rungs that clamp
      to ≤ 0 are dropped.
+   The rung-laying logic is identical for both modes — only the anchor price differs, so the
+   two modes are a clean A/B with one config flip.
 3. **Naked-cap:** `naked = inv_yes − inv_no`. If `naked ≥ cfg.naked_cap` → desired YES rungs
    = [] (cancel all YES rungs). If `-naked ≥ cfg.naked_cap` → desired NO rungs = [].
 4. **pair_ok per rung** (cost-basis): a rung is desired only if the pair it would form costs
@@ -102,11 +111,12 @@ Per tick:
 ## Config additions (live-editable)
 
 ```python
-rungs: int = 5             # rungs per side
-rung_size: int = 5         # shares per rung
-rung_spacing: float = 0.03 # price step between rungs
-naked_cap: int = 10        # max |naked| → pull heavier side's rungs
-per_window_cap: float = 12 # max $ committed per window
+ladder_anchor: str = "entry"  # "entry" (static from entry-mid) | "book" (chase best bid)
+rungs: int = 5                # rungs per side
+rung_size: int = 5            # shares per rung
+rung_spacing: float = 0.03    # price step between rungs
+naked_cap: int = 10           # max |naked| → pull heavier side's rungs
+per_window_cap: float = 12    # max $ committed per window
 ```
 Existing knobs (`flat_size`, `merge_levels`, `max_naked_shares`) remain for the non-ladder
 path. `run_control.py` sets the small first-live config above with the ladder path enabled.
@@ -122,10 +132,11 @@ path. `run_control.py` sets the small first-live config above with the ladder pa
 
 ## Testing
 
-- **Pure `plan_ladder`:** rung placement from a given `entry_mid` (correct prices/spacing/
-  count); ask-clamp drops crossing rungs; `pair_ok` blocks a rung that would form a ≥$1
-  pair given a held cost basis; naked-cap cancels the heavier side's rungs; capital-cap
-  cancels everything.
+- **Pure `plan_ladder`:** rung placement from a given anchor (correct prices/spacing/count);
+  `ladder_anchor="entry"` anchors to `entry_mid` while `"book"` anchors to the current bid
+  (assert the two modes produce different rung prices when entry_mid ≠ current bid);
+  ask-clamp drops crossing rungs; `pair_ok` blocks a rung that would form a ≥$1 pair given a
+  held cost basis; naked-cap cancels the heavier side's rungs; capital-cap cancels everything.
 - **Lag-fill simulator** (extend `LaggedRequoteSim` style): scripted "Down dumps" window →
   low Down rungs fill cheap, naked stays ≤ `naked_cap`, a pair forms on the cheap fills →
   assert resulting matched-pair avg cost < $1.
