@@ -23,10 +23,10 @@ from quoter.runner.trading_state import TradingState
 from quoter.runner.merge_runner import MergeRunner
 from quoter.runner.control_dashboard import make_control_app
 
-# Hard caps for the controlled live run (BTC-only, tiny size).
+# Hard caps for the controlled live run (BTC-only, small size).
 CFG = Config(
     merge_edge=0.01, max_naked_shares=10, merge_levels=1,
-    flat_size=5, per_market_cap_usd=5.0, min_time_to_expiry_sec=5.0,
+    flat_size=10, per_market_cap_usd=12.0, min_time_to_expiry_sec=5.0,
 )
 
 
