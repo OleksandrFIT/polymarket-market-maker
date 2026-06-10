@@ -70,5 +70,57 @@ def reconstruct_window(window_id: str, trades: list[Trade], winning_side: str) -
     )
 
 
-def aggregate(results):  # full implementation added in Task 2
-    raise NotImplementedError("aggregate is implemented in Task 2")
+@dataclass
+class Report:
+    n_windows: int
+    n_hedged: int           # windows with both sides bought
+    n_naked: int            # windows carrying any unmatched shares
+    avg_pair_cost: float    # over hedged windows
+    total_pair_pnl: float
+    total_naked_pnl: float
+    total_net: float
+    net_per_window: float
+    pct_windows_positive: float
+    total_spend: float
+    avg_size_per_window: float
+    verdict: str
+
+
+def aggregate(results: list[WindowResult]) -> Report:
+    """Roll per-window results into the go/no-go report.
+
+    Verdict (per spec):
+      DON'T BUILD              if total_net <= 0
+      DON'T BUILD (naked luck) if net > 0 but pair edge itself <= 0 (gambling)
+      STRONG BUILD             if pair edge > 0 and > 50% of windows net-positive
+      BUILD                    otherwise (pair edge > 0, net > 0)
+    """
+    n = len(results)
+    if n == 0:
+        return Report(0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "NO DATA")
+
+    hedged = [r for r in results if r.up_shares > 0 and r.down_shares > 0]
+    naked = [r for r in results if r.naked_shares > 0]
+    avg_pair = sum(r.pair_cost for r in hedged) / len(hedged) if hedged else 0.0
+    tot_pair = sum(r.pair_pnl for r in results)
+    tot_naked = sum(r.naked_pnl for r in results)
+    tot_net = tot_pair + tot_naked
+    pct_pos = 100.0 * sum(1 for r in results if r.net > 0) / n
+    tot_spend = sum(r.spend for r in results)
+    avg_size = sum(r.up_shares + r.down_shares for r in results) / n
+
+    if tot_net <= 0:
+        verdict = "DON'T BUILD"
+    elif tot_pair <= 0:
+        verdict = "DON'T BUILD (net positive only via naked luck)"
+    elif pct_pos > 50:
+        verdict = "STRONG BUILD"
+    else:
+        verdict = "BUILD"
+
+    return Report(
+        n_windows=n, n_hedged=len(hedged), n_naked=len(naked), avg_pair_cost=avg_pair,
+        total_pair_pnl=tot_pair, total_naked_pnl=tot_naked, total_net=tot_net,
+        net_per_window=tot_net / n, pct_windows_positive=pct_pos,
+        total_spend=tot_spend, avg_size_per_window=avg_size, verdict=verdict,
+    )
