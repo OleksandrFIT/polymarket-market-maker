@@ -9,6 +9,7 @@ Live, BTC-only, hard caps. Default STOPPED — never auto-trades.
 from __future__ import annotations
 
 import asyncio
+from time import monotonic
 
 import httpx
 
@@ -222,59 +223,77 @@ class MergeRunner:
 
         coll_start = self.collateral_usd()
         resting: dict[str, RestingOrder | None] = {"YES": None, "NO": None}
+        placed_at: dict[str, float] = {"YES": 0.0, "NO": 0.0}
 
-        while m.time_remaining() > END_BUFFER_SEC:
-            if self.state.force_stop_requested:
-                log.info("runner_requote_force_break", slug=m.slug)
-                break
-            try:
-                async with httpx.AsyncClient(timeout=6) as cl:
-                    by = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.yes_token})).json()
-                    bn = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.no_token})).json()
-            except Exception:
-                await asyncio.sleep(REQUOTE_SEC)
-                continue
-            yes_bid, no_bid = _best(by, "bids"), _best(bn, "bids")
-            if not yes_bid or not no_bid:
-                await asyncio.sleep(REQUOTE_SEC)
-                continue
-            inv_yes, inv_no = self._shares(m.yes_token), self._shares(m.no_token)
-            coll_now = self.collateral_usd()
-            # Spend for the capital gate = the LARGER of the balance delta and an
-            # inventory-based estimate, so the cap is enforced even if a balance
-            # read fails (returns -1) — fail-safe toward stopping, never spending.
-            spent_bal = (coll_start - coll_now) if (coll_start >= 0 and coll_now >= 0) else 0.0
-            spent_inv = inv_yes * yes_bid + inv_no * no_bid
-            spent = max(0.0, spent_bal, spent_inv)
-            # reconcile our tracked orders with reality (filled/cancelled drop out)
-            open_ids = self._open_order_ids()
-            for side in ("YES", "NO"):
-                ro = resting[side]
-                if ro is not None and ro.order_id not in open_ids:
-                    resting[side] = None
-            plan = plan_requote(
-                yes_bid=yes_bid, no_bid=no_bid, inv_yes=inv_yes, inv_no=inv_no,
-                yes_cost=spent, no_cost=0.0, resting=resting, cfg=self.cfg)
-            for cid in plan.cancels:
-                await self.clob.cancel_orders([cid])
-                for s in ("YES", "NO"):
-                    if resting[s] is not None and resting[s].order_id == cid:
-                        resting[s] = None
-            for q in plan.posts:
-                tok = m.yes_token if q.side == "YES" else m.no_token
-                r = await self.clob.place_limit(token_id=tok, price=q.price, size=q.size,
-                                                side="BUY", post_only=True)
-                if r and r.get("order_id"):
-                    resting[q.side] = RestingOrder(r["order_id"], q.side, q.price, q.size)
-            self.state.pairs_caught = min(inv_yes, inv_no)
-            self.state.naked_shares = abs(inv_yes - inv_no)
-            await asyncio.sleep(REQUOTE_SEC)
+        try:
+            while m.time_remaining() > END_BUFFER_SEC:
+                if self.state.force_stop_requested:
+                    log.info("runner_requote_force_break", slug=m.slug)
+                    break
+                try:
+                    async with httpx.AsyncClient(timeout=6) as cl:
+                        by = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.yes_token})).json()
+                        bn = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.no_token})).json()
+                except Exception:
+                    await asyncio.sleep(REQUOTE_SEC)
+                    continue
+                yes_bid, no_bid = _best(by, "bids"), _best(bn, "bids")
+                if not yes_bid or not no_bid:
+                    await asyncio.sleep(REQUOTE_SEC)
+                    continue
+                inv_yes, inv_no = self._shares(m.yes_token), self._shares(m.no_token)
+                coll_now = self.collateral_usd()
+                now = monotonic()
 
-        # window end / force break: cancel any of our still-resting orders
-        for side in ("YES", "NO"):
-            ro = resting[side]
-            if ro is not None:
-                await self.clob.cancel_orders([ro.order_id])
+                # Reconcile tracked orders with reality, but only DROP an order
+                # that's been gone for > one cadence — a just-placed order can be
+                # missing from a stale get_open_orders read (avoids double-posting).
+                open_ids = self._open_order_ids()
+                for side in ("YES", "NO"):
+                    ro = resting[side]
+                    if ro is not None and ro.order_id not in open_ids and (now - placed_at[side]) > REQUOTE_SEC:
+                        resting[side] = None
+
+                # FORWARD-LOOKING spend: realized (balance-delta OR inventory est,
+                # whichever larger — fail-safe) PLUS the value of orders still
+                # resting. We only post if committed + new_post stays within the
+                # cap, so realized spend can never exceed per_market_cap_usd.
+                spent_bal = (coll_start - coll_now) if (coll_start >= 0 and coll_now >= 0) else 0.0
+                spent_inv = inv_yes * yes_bid + inv_no * no_bid
+                resting_val = sum(ro.price * ro.size for ro in resting.values() if ro is not None)
+                committed = max(0.0, spent_bal, spent_inv) + resting_val
+
+                plan = plan_requote(
+                    yes_bid=yes_bid, no_bid=no_bid, inv_yes=inv_yes, inv_no=inv_no,
+                    yes_cost=committed, no_cost=0.0, resting=resting, cfg=self.cfg)
+
+                # batch cancels (fewer requests)
+                if plan.cancels:
+                    await self.clob.cancel_orders(plan.cancels)
+                    for s in ("YES", "NO"):
+                        if resting[s] is not None and resting[s].order_id in plan.cancels:
+                            resting[s] = None
+
+                # only add exposure that keeps committed within the cap
+                post_cost = sum(q.price * q.size for q in plan.posts)
+                if plan.posts and committed + post_cost <= self.cfg.per_market_cap_usd + 1e-9:
+                    for q in plan.posts:
+                        tok = m.yes_token if q.side == "YES" else m.no_token
+                        r = await self.clob.place_limit(token_id=tok, price=q.price, size=q.size,
+                                                        side="BUY", post_only=True)
+                        if r and r.get("order_id"):
+                            resting[q.side] = RestingOrder(r["order_id"], q.side, q.price, q.size)
+                            placed_at[q.side] = now
+
+                self.state.pairs_caught = min(inv_yes, inv_no)
+                self.state.naked_shares = abs(inv_yes - inv_no)
+                await asyncio.sleep(REQUOTE_SEC)
+        finally:
+            # Robust cleanup on graceful end, FORCE STOP, or any exception:
+            # cancel ALL our resting orders account-wide (covers any order dropped
+            # from local tracking). Held positions/pairs are untouched.
+            await self.cancel_all()
+
         iy, inn = self._shares(m.yes_token), self._shares(m.no_token)
         self.state.last_event = f"re-quote done: matched={min(iy, inn)} naked={abs(iy - inn)}"
         log.info("runner_requote_done", slug=m.slug, matched=min(iy, inn), naked=abs(iy - inn))
