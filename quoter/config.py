@@ -45,6 +45,13 @@ class Config:
     naked_cap: int = 10           # max |inv_yes - inv_no| → pull heavier side's rungs
     per_window_cap: float = 12.0  # $ ceiling on committed spend per window
 
+    # phase-23 Binance trend detector
+    trend_enabled: bool = True
+    trend_confidence: float = 0.35    # THE knob: suppress a side when its win-prob < this
+    trend_buffer_sec: float = 60.0    # rolling price-buffer window (seconds)
+    trend_vol_fallback: float = 30.0  # fallback $-vol of BTC over a 5m window if buffer thin
+    trend_stale_sec: float = 10.0     # buffer newest entry older than this → NEUTRAL (fail-safe)
+
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle
     requote_on_mid_move_cents: int = 1
