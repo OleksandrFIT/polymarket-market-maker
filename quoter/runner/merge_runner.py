@@ -339,6 +339,7 @@ class MergeRunner:
         entry_mid = mid_at_entry
         resting: dict[str, list[RestingOrder]] = {"YES": [], "NO": []}
         placed_at: dict[str, float] = {}     # order_id -> monotonic time placed
+        last_px: dict[str, float] = {"YES": 0.0, "NO": 0.0}
         local = LocalInventory()
 
         try:
@@ -370,11 +371,12 @@ class MergeRunner:
                     for ro in resting[side]:
                         if ro.order_id not in open_ids and (now - placed_at.get(ro.order_id, 0.0)) > REQUOTE_SEC:
                             local.credit_fill(side, ro.size, ro.price)
+                            placed_at.pop(ro.order_id, None)
                         else:
                             kept.append(ro)
                     resting[side] = kept
-                local.reconcile_up("YES", chain_yes, yes_bid)
-                local.reconcile_up("NO", chain_no, no_bid)
+                local.reconcile_up("YES", chain_yes, last_px["YES"] or yes_bid)
+                local.reconcile_up("NO", chain_no, last_px["NO"] or no_bid)
                 inv_yes, inv_no = local.inv["YES"], local.inv["NO"]
 
                 spent_bal = (coll_start - coll_now) if (coll_start >= 0 and coll_now >= 0) else 0.0
@@ -403,6 +405,7 @@ class MergeRunner:
                     if r and r.get("order_id"):
                         resting[q.side].append(RestingOrder(r["order_id"], q.side, q.price, q.size))
                         placed_at[r["order_id"]] = now
+                        last_px[q.side] = q.price
                         committed += post_cost
 
                 self.state.pairs_caught = min(inv_yes, inv_no)
