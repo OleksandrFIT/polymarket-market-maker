@@ -37,6 +37,14 @@ class Config:
     per_market_cap_usd: float = 50.0     # $ ceiling on ACCUMULATED spend per market
     min_time_to_expiry_sec: float = 5.0  # below this → no quotes
 
+    # phase-22 laddered re-quoter
+    ladder_anchor: str = "entry"  # "entry" (static from entry-mid) | "book" (chase best bid)
+    rungs: int = 5                # rungs per side
+    rung_size: int = 5            # shares per rung (Polymarket min 5)
+    rung_spacing: float = 0.03    # price step between rungs
+    naked_cap: int = 10           # max |inv_yes - inv_no| → pull heavier side's rungs
+    per_window_cap: float = 12.0  # $ ceiling on committed spend per window
+
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle
     requote_on_mid_move_cents: int = 1
