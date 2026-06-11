@@ -83,11 +83,19 @@ def plan_ladder(
         other = yes_avg if (naked > 0 and yes_avg is not None) else (yes_rungs[0] if yes_rungs else 1.0)
         return (price + other) < 1.0
 
+    # Staged posting: desire only the next cfg.max_inflight_rungs rungs from the FILLED
+    # depth (inv // rung_size — shallowest rungs fill first as the price descends). A
+    # deeper rung is posted only once the shallower one fills, so a fast crash can sweep
+    # at most max_inflight_rungs * rung_size before the cap reacts (and post-only rejects
+    # a deeper rung once the market has crashed past it), instead of the whole ladder.
+    mif = cfg.max_inflight_rungs
+    yd = int(inv_yes // cfg.rung_size)
+    nd = int(inv_no // cfg.rung_size)
     desired: dict[str, list[float]] = {"YES": [], "NO": []}
     if inv_yes < target and naked < cfg.naked_cap:
-        desired["YES"] = [p for p in yes_rungs if pair_ok("YES", p)]
+        desired["YES"] = [p for p in yes_rungs[yd:yd + mif] if pair_ok("YES", p)]
     if inv_no < target and -naked < cfg.naked_cap:
-        desired["NO"] = [p for p in no_rungs if pair_ok("NO", p)]
+        desired["NO"] = [p for p in no_rungs[nd:nd + mif] if pair_ok("NO", p)]
 
     # Trend detector: suppress the losing side's rungs (sit out the trend).
     if trend_bias == "UP":

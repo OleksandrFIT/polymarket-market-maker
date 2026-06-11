@@ -99,3 +99,20 @@ def test_trend_bias_neutral_is_default():
         inv_yes=0, inv_no=0, yes_cost=0.0, no_cost=0.0, committed=0.0,
         resting={"YES": [], "NO": []}, cfg=cfg())
     assert any(q.side == "YES" for q in p.posts) and any(q.side == "NO" for q in p.posts)
+
+
+def test_staged_posting_limits_to_inflight_rungs():
+    # max_inflight_rungs=1 → only the top (shallowest) rung per side is desired
+    c = cfg(max_inflight_rungs=1)
+    p = _plan(c=c)
+    assert _prices(p.posts, "YES") == [0.44]   # top YES rung only
+    assert _prices(p.posts, "NO") == [0.54]     # top NO rung only
+
+
+def test_staged_posting_advances_with_filled_depth():
+    # 5 YES + 5 NO already filled (depth 1) → next rung of each side desired
+    c = cfg(max_inflight_rungs=1)
+    p = _plan(inv_yes=5, inv_no=5, yes_cost=5 * 0.44, no_cost=5 * 0.54,
+              committed=5 * 0.98, c=c)
+    assert _prices(p.posts, "YES") == [0.41]
+    assert _prices(p.posts, "NO") == [0.51]

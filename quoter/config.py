@@ -44,6 +44,8 @@ class Config:
     rung_spacing: float = 0.03    # price step between rungs
     naked_cap: int = 10           # max |inv_yes - inv_no| → pull heavier side's rungs
     per_window_cap: float = 12.0  # $ ceiling on committed spend per window
+    max_inflight_rungs: int = 99  # staged posting: max rungs resting per side at once
+                                  # (99 = all = legacy; run_control sets 1 to bound sweep)
 
     # phase-23 Binance trend detector
     trend_enabled: bool = True
