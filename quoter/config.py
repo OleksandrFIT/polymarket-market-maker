@@ -51,6 +51,7 @@ class Config:
     trend_buffer_sec: float = 60.0    # rolling price-buffer window (seconds)
     trend_vol_fallback: float = 30.0  # fallback $-vol of BTC over a 5m window if buffer thin
     trend_stale_sec: float = 10.0     # buffer newest entry older than this → NEUTRAL (fail-safe)
+    trend_gate_sec: float = 90.0      # detector acts only in the last N sec of the window
 
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle

@@ -43,9 +43,14 @@ def sigma_remaining(prices: list[tuple[float, float]], time_left: float, cfg: Co
     return max(sig, 1.0)
 
 
-def detect_bias(price_now: float, strike: float, sigma_remaining: float, cfg: Config) -> str:
-    """Return "UP" | "DOWN" | "NEUTRAL". Suppress the side whose win-prob < trend_confidence.
-    "UP" = Up is winning → suppress Down (NO). "DOWN" = Down winning → suppress Up (YES)."""
+def detect_bias(price_now: float, strike: float, sigma_remaining: float,
+                time_left: float, cfg: Config) -> str:
+    """Return "UP" | "DOWN" | "NEUTRAL". Acts only in the last cfg.trend_gate_sec of the
+    window (early swings are ignored as noise that will likely revert). Within the gate,
+    suppress the side whose win-prob < trend_confidence. "UP" = Up winning → suppress Down
+    (NO); "DOWN" = Down winning → suppress Up (YES)."""
+    if time_left > cfg.trend_gate_sec:
+        return "NEUTRAL"
     p_up = win_prob_up(price_now, strike, sigma_remaining)
     t = cfg.trend_confidence
     if p_up < t:
