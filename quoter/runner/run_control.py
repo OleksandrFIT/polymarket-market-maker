@@ -28,8 +28,12 @@ from quoter.runner.control_dashboard import make_control_app
 # so realized spend stays <= $6). Naked is bounded by max_naked + one in-flight
 # fill, i.e. up to ~10 shares (~$5) worst case — a fill can land just past the cap.
 CFG = Config(
-    merge_edge=0.01, max_naked_shares=5, merge_levels=1,
+    merge_edge=0.02, max_naked_shares=5, merge_levels=1,
     flat_size=5, per_market_cap_usd=6.0, min_time_to_expiry_sec=5.0,
+    # phase-22 ladder (small first-live). per_window_cap=25 fits the full 5x5 ladder
+    # notional (~$21.50); the REAL risk is bounded by naked_cap=10 (~$4.50 unhedged).
+    ladder_anchor="entry", rungs=5, rung_size=5, rung_spacing=0.03,
+    naked_cap=10, per_window_cap=25.0,
 )
 # Use continuous re-quoting (active two-sided market making) when trading.
 REQUOTE = True

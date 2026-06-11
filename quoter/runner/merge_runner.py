@@ -22,6 +22,7 @@ from quoter.ops.logger import get_logger
 from quoter.runner.trading_state import TradingState
 from quoter.runner.requote_planner import RestingOrder, plan_requote
 from quoter.runner.local_inventory import LocalInventory
+from quoter.runner.ladder_planner import plan_ladder
 
 log = get_logger("merge_runner")
 
@@ -201,7 +202,9 @@ class MergeRunner:
                         fresh_min_sec=FRESH_MIN_SEC, balanced=BALANCED,
                         already_traded=m.open_ts in self._traded_windows)
                     if enter:
-                        if self.requote:
+                        if self.requote and self.cfg.rungs > 1:
+                            await self._ladder_window(m, mid)
+                        elif self.requote:
                             await self._requote_window(m, mid)
                         else:
                             await self.trade_window(m, mid)
@@ -321,6 +324,97 @@ class MergeRunner:
         inn = max(self._shares(m.no_token), local.inv["NO"])
         self.state.last_event = f"re-quote done: matched={min(iy, inn)} naked={abs(iy - inn)}"
         log.info("runner_requote_done", slug=m.slug, matched=min(iy, inn), naked=abs(iy - inn))
+
+    async def _ladder_window(self, m, mid_at_entry: float) -> None:
+        """LIVE laddered re-quoting: rest a deep ladder of bids both sides (anchor per
+        cfg.ladder_anchor), credit fills to LocalInventory, cap naked by pulling the
+        heavier side's rungs. Operator-gated; the brain (plan_ladder) is sim-tested."""
+        self._traded_windows.add(m.open_ts)
+        self.state.windows_traded += 1
+        self.state.last_window = m.slug
+        self.state.last_event = f"laddering {m.slug} (mid {mid_at_entry:.2f})"
+        log.info("runner_ladder_enter", slug=m.slug, mid=round(mid_at_entry, 3))
+
+        coll_start = self.collateral_usd()
+        entry_mid = mid_at_entry
+        resting: dict[str, list[RestingOrder]] = {"YES": [], "NO": []}
+        placed_at: dict[str, float] = {}     # order_id -> monotonic time placed
+        local = LocalInventory()
+
+        try:
+            while m.time_remaining() > END_BUFFER_SEC:
+                if self.state.force_stop_requested:
+                    log.info("runner_ladder_force_break", slug=m.slug)
+                    break
+                try:
+                    async with httpx.AsyncClient(timeout=6) as cl:
+                        by = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.yes_token})).json()
+                        bn = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.no_token})).json()
+                except Exception:
+                    await asyncio.sleep(REQUOTE_SEC)
+                    continue
+                yes_bid, no_bid = _best(by, "bids"), _best(bn, "bids")
+                yes_ask, no_ask = _best(by, "asks"), _best(bn, "asks")
+                if not yes_bid or not no_bid:
+                    await asyncio.sleep(REQUOTE_SEC)
+                    continue
+
+                chain_yes, chain_no = self._shares(m.yes_token), self._shares(m.no_token)
+                coll_now = self.collateral_usd()
+                now = monotonic()
+
+                # Credit filled rungs (vanished uncancelled), drop them from the list.
+                open_ids = self._open_order_ids()
+                for side in ("YES", "NO"):
+                    kept = []
+                    for ro in resting[side]:
+                        if ro.order_id not in open_ids and (now - placed_at.get(ro.order_id, 0.0)) > REQUOTE_SEC:
+                            local.credit_fill(side, ro.size, ro.price)
+                        else:
+                            kept.append(ro)
+                    resting[side] = kept
+                local.reconcile_up("YES", chain_yes, yes_bid)
+                local.reconcile_up("NO", chain_no, no_bid)
+                inv_yes, inv_no = local.inv["YES"], local.inv["NO"]
+
+                spent_bal = (coll_start - coll_now) if (coll_start >= 0 and coll_now >= 0) else 0.0
+                realized = max(spent_bal, local.cost["YES"] + local.cost["NO"])
+                resting_val = sum(ro.price * ro.size for s in ("YES", "NO") for ro in resting[s])
+                committed = max(0.0, realized) + resting_val
+
+                plan = plan_ladder(
+                    yes_bid=yes_bid, no_bid=no_bid, yes_ask=yes_ask, no_ask=no_ask,
+                    entry_mid=entry_mid, inv_yes=inv_yes, inv_no=inv_no,
+                    yes_cost=local.cost["YES"], no_cost=local.cost["NO"],
+                    committed=committed, resting=resting, cfg=self.cfg)
+
+                if plan.cancels:
+                    await self.clob.cancel_orders(plan.cancels)
+                    for side in ("YES", "NO"):
+                        resting[side] = [ro for ro in resting[side] if ro.order_id not in plan.cancels]
+
+                for q in plan.posts:
+                    post_cost = q.price * q.size
+                    if committed + post_cost > self.cfg.per_window_cap + 1e-9:
+                        continue
+                    tok = m.yes_token if q.side == "YES" else m.no_token
+                    r = await self.clob.place_limit(token_id=tok, price=q.price, size=q.size,
+                                                    side="BUY", post_only=True)
+                    if r and r.get("order_id"):
+                        resting[q.side].append(RestingOrder(r["order_id"], q.side, q.price, q.size))
+                        placed_at[r["order_id"]] = now
+                        committed += post_cost
+
+                self.state.pairs_caught = min(inv_yes, inv_no)
+                self.state.naked_shares = abs(inv_yes - inv_no)
+                await asyncio.sleep(REQUOTE_SEC)
+        finally:
+            await self.cancel_all()
+
+        iy = max(self._shares(m.yes_token), local.inv["YES"])
+        inn = max(self._shares(m.no_token), local.inv["NO"])
+        self.state.last_event = f"ladder done: matched={min(iy, inn)} naked={abs(iy - inn)}"
+        log.info("runner_ladder_done", slug=m.slug, matched=min(iy, inn), naked=abs(iy - inn))
 
     def shutdown(self) -> None:
         self._shutdown = True
