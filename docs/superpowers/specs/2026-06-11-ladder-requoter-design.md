@@ -36,7 +36,8 @@ naked-cap, never accumulate directional size (the competitor's losing −$2,226 
    the heavier side (stop buying the crashing side); keep the opposite side's rungs to
    complete pairs; hold the cheap naked leg to resolution. No taker-rebalance in v1 (YAGNI).
 3. **First live size (small):** 5 rungs/side × 5 shares, 3¢ spacing (top to −12¢),
-   naked_cap 10, ~$9/window. Size is a live-editable config knob; scale only after the
+   naked_cap 10 (~$4.50 real risk), per_window_cap 25 (fits the ~$21.50 ladder notional).
+   Size is a live-editable config knob; scale only after the
    small run shows real cheap-fill capture.
 
 ## Architecture
@@ -115,9 +116,15 @@ ladder_anchor: str = "entry"  # "entry" (static from entry-mid) | "book" (chase 
 rungs: int = 5                # rungs per side
 rung_size: int = 5            # shares per rung
 rung_spacing: float = 0.03    # price step between rungs
-naked_cap: int = 10           # max |naked| → pull heavier side's rungs
-per_window_cap: float = 12    # max $ committed per window
+naked_cap: int = 10           # max |naked| → pull heavier side's rungs (the REAL risk bound)
+per_window_cap: float = 25    # $ ceiling on capital DEPLOYED (resting + filled) per window
 ```
+
+**Capital vs risk (important):** `per_window_cap` bounds total capital *deployed* (resting
+notional + filled) — it must be ≥ the full ladder notional or the gate cancels the whole
+ladder. A 5×5 ladder rests ~$21.50, so `per_window_cap=25`. Actual *risk* per window is the
+unhedged naked legs, bounded separately by `naked_cap` (10 shares ≈ $4.50); matched pairs are
+hedged (return ~$1 each), not risk. So ~$25 deployed, ~$4.50 at risk, on ~$88 cash.
 Existing knobs (`flat_size`, `merge_levels`, `max_naked_shares`) remain for the non-ladder
 path. `run_control.py` sets the small first-live config above with the ladder path enabled.
 
