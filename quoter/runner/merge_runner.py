@@ -84,7 +84,7 @@ class MergeRunner:
         if monotonic() - last_ts > self.cfg.trend_stale_sec:
             return "NEUTRAL"
         sig = sigma_remaining(self._btc_buf, time_left, self.cfg)
-        return detect_bias(price_now, strike, sig, self.cfg)
+        return detect_bias(price_now, strike, sig, time_left, self.cfg)
 
     def _read_client(self):
         if self._rc is None:
