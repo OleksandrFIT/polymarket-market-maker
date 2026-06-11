@@ -23,6 +23,8 @@ from quoter.runner.trading_state import TradingState
 from quoter.runner.requote_planner import RestingOrder, plan_requote
 from quoter.runner.local_inventory import LocalInventory
 from quoter.runner.ladder_planner import plan_ladder
+from quoter.runner.trend_detector import detect_bias, sigma_remaining
+from quoter.feeds.binance_ws import BinanceWS
 
 log = get_logger("merge_runner")
 
@@ -62,6 +64,27 @@ class MergeRunner:
         self._rc = None  # lazy read client (py_clob_client_v2)
         self._traded_windows: set[int] = set()
         self._shutdown = False
+        self._btc_buf: list[tuple[float, float]] = []   # (price, monotonic_ts)
+        self._binance = BinanceWS(("BTC",), self._on_btc) if cfg.trend_enabled else None
+        self._binance_task = None
+
+    async def _on_btc(self, asset: str, price: float, ts: float) -> None:
+        """BinanceWS callback: append to the rolling buffer (arrival-time stamped) and
+        drop entries older than trend_buffer_sec."""
+        now = monotonic()
+        self._btc_buf.append((price, now))
+        cutoff = now - self.cfg.trend_buffer_sec
+        self._btc_buf = [(p, t) for (p, t) in self._btc_buf if t >= cutoff]
+
+    def _trend_bias(self, strike: float | None, time_left: float) -> str:
+        """Current trend bias, or NEUTRAL when disabled / no strike / buffer stale."""
+        if not self.cfg.trend_enabled or strike is None or not self._btc_buf:
+            return "NEUTRAL"
+        price_now, last_ts = self._btc_buf[-1]
+        if monotonic() - last_ts > self.cfg.trend_stale_sec:
+            return "NEUTRAL"
+        sig = sigma_remaining(self._btc_buf, time_left, self.cfg)
+        return detect_bias(price_now, strike, sig, self.cfg)
 
     def _read_client(self):
         if self._rc is None:
@@ -190,6 +213,8 @@ class MergeRunner:
 
     async def run_forever(self) -> None:
         log.info("runner_started", mode=self.state.mode)
+        if self._binance is not None and self._binance_task is None:
+            self._binance_task = asyncio.create_task(self._binance.run())
         while not self._shutdown:
             try:
                 if self.state.drain_force_stop():
@@ -341,6 +366,7 @@ class MergeRunner:
         placed_at: dict[str, float] = {}     # order_id -> monotonic time placed
         last_px: dict[str, float] = {"YES": 0.0, "NO": 0.0}
         local = LocalInventory()
+        strike = self._btc_buf[-1][0] if self._btc_buf else None
 
         try:
             while m.time_remaining() > END_BUFFER_SEC:
@@ -384,11 +410,14 @@ class MergeRunner:
                 resting_val = sum(ro.price * ro.size for s in ("YES", "NO") for ro in resting[s])
                 committed = max(0.0, realized) + resting_val
 
+                tbias = self._trend_bias(strike, m.time_remaining())
+                self.state.last_event = f"laddering {m.slug} (bias {tbias})"
                 plan = plan_ladder(
                     yes_bid=yes_bid, no_bid=no_bid, yes_ask=yes_ask, no_ask=no_ask,
                     entry_mid=entry_mid, inv_yes=inv_yes, inv_no=inv_no,
                     yes_cost=local.cost["YES"], no_cost=local.cost["NO"],
-                    committed=committed, resting=resting, cfg=self.cfg)
+                    committed=committed, resting=resting, cfg=self.cfg,
+                    trend_bias=tbias)
 
                 if plan.cancels:
                     await self.clob.cancel_orders(plan.cancels)
