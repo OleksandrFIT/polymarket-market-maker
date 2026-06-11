@@ -73,3 +73,29 @@ def test_keeps_existing_rung_reposts_missing():
     p = _plan(resting=resting)
     assert "y1" not in p.cancels
     assert _prices(p.posts, "YES") == [0.41, 0.38, 0.35, 0.32]
+
+
+def test_trend_bias_suppresses_losing_side():
+    # bias "UP" → Down is loser → no NO rungs posted; YES rungs still posted
+    p_up = plan_ladder(
+        yes_bid=0.44, no_bid=0.54, yes_ask=0.99, no_ask=0.99, entry_mid=0.45,
+        inv_yes=0, inv_no=0, yes_cost=0.0, no_cost=0.0, committed=0.0,
+        resting={"YES": [], "NO": []}, cfg=cfg(), trend_bias="UP")
+    assert any(q.side == "YES" for q in p_up.posts)
+    assert not any(q.side == "NO" for q in p_up.posts)
+    # bias "DOWN" → Up is loser → no YES rungs
+    p_dn = plan_ladder(
+        yes_bid=0.44, no_bid=0.54, yes_ask=0.99, no_ask=0.99, entry_mid=0.45,
+        inv_yes=0, inv_no=0, yes_cost=0.0, no_cost=0.0, committed=0.0,
+        resting={"YES": [], "NO": []}, cfg=cfg(), trend_bias="DOWN")
+    assert not any(q.side == "YES" for q in p_dn.posts)
+    assert any(q.side == "NO" for q in p_dn.posts)
+
+
+def test_trend_bias_neutral_is_default():
+    # default NEUTRAL → both sides (same as no bias passed)
+    p = plan_ladder(
+        yes_bid=0.44, no_bid=0.54, yes_ask=0.99, no_ask=0.99, entry_mid=0.45,
+        inv_yes=0, inv_no=0, yes_cost=0.0, no_cost=0.0, committed=0.0,
+        resting={"YES": [], "NO": []}, cfg=cfg())
+    assert any(q.side == "YES" for q in p.posts) and any(q.side == "NO" for q in p.posts)

@@ -51,6 +51,7 @@ def plan_ladder(
     committed: float,
     resting: dict[str, list[RestingOrder]],
     cfg: Config,
+    trend_bias: str = "NEUTRAL",
 ) -> LadderPlan:
     """Return the (cancels, posts) ladder plan for this tick. Pure + deterministic."""
     plan = LadderPlan()
@@ -87,6 +88,12 @@ def plan_ladder(
         desired["YES"] = [p for p in yes_rungs if pair_ok("YES", p)]
     if inv_no < target and -naked < cfg.naked_cap:
         desired["NO"] = [p for p in no_rungs if pair_ok("NO", p)]
+
+    # Trend detector: suppress the losing side's rungs (sit out the trend).
+    if trend_bias == "UP":
+        desired["NO"] = []     # Up winning → Down is the loser
+    elif trend_bias == "DOWN":
+        desired["YES"] = []    # Down winning → Up is the loser
 
     for side in ("YES", "NO"):
         want = set(desired[side])
