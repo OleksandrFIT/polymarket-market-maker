@@ -11,7 +11,7 @@ from quoter.runner.requote_planner import RestingOrder
 
 def cfg(**kw):
     base = dict(merge_edge=0.02, ladder_anchor="entry", rungs=5, rung_size=5,
-                rung_spacing=0.03, naked_cap=10, per_window_cap=12.0)
+                rung_spacing=0.03, naked_cap=10, per_window_cap=25.0)
     base.update(kw)
     return Config(**base)
 
@@ -60,12 +60,12 @@ def test_naked_bounded_on_one_sided_dump():
         sim.tick(0.44, p, fills=[("NO", p)])
     assert sim.max_naked <= c.naked_cap + c.rung_size
     assert sim.local.inv["NO"] <= c.naked_cap + c.rung_size
+    assert sim.local.inv["NO"] >= c.rung_size          # non-vacuous: the ladder actually filled
+    assert sim.local.inv["NO"] >= c.naked_cap          # accumulated up to ~the cap before rungs were pulled
 
 
 def test_cheap_pair_forms_on_two_sided_dips():
-    # per_window_cap must exceed the total resting notional (≈$21.50 for 10 rungs)
-    # so that tick-2 does not cancel all orders before the scripted fills land.
-    c = cfg(per_window_cap=30.0)
+    c = cfg()
     sim = LadderSim(cfg=c, entry_mid=0.45)
     sim.tick(0.44, 0.54)
     sim.tick(0.44, 0.54, fills=[("YES", 0.35), ("NO", 0.45)])
