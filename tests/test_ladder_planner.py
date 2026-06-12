@@ -15,14 +15,15 @@ def cfg(**kw):
 def _plan(**kw):
     base = dict(yes_bid=0.44, no_bid=0.54, yes_ask=0.99, no_ask=0.99, entry_mid=0.45,
                 inv_yes=0, inv_no=0, yes_cost=0.0, no_cost=0.0, committed=0.0,
-                resting={"YES": [], "NO": []}, c=None)
+                resting={"YES": [], "NO": []}, c=None, suppressed=frozenset())
     base.update(kw)
     c = base.pop("c") or cfg()
     return plan_ladder(
         yes_bid=base["yes_bid"], no_bid=base["no_bid"], yes_ask=base["yes_ask"],
         no_ask=base["no_ask"], entry_mid=base["entry_mid"], inv_yes=base["inv_yes"],
         inv_no=base["inv_no"], yes_cost=base["yes_cost"], no_cost=base["no_cost"],
-        committed=base["committed"], resting=base["resting"], cfg=c)
+        committed=base["committed"], resting=base["resting"], cfg=c,
+        suppressed=base["suppressed"])
 
 
 def _prices(posts, side):
@@ -126,3 +127,13 @@ def test_staged_posting_advances_with_filled_depth():
               committed=5 * 0.98, c=c)
     assert _prices(p.posts, "YES") == [0.41]
     assert _prices(p.posts, "NO") == [0.51]
+
+
+def test_suppressed_side_posts_nothing():
+    # a suppressed side yields no posts and its existing rungs are cancelled;
+    # the other side trades normally.
+    resting = {"YES": [RestingOrder("y1", "YES", 0.44, 5)], "NO": []}
+    p = _plan(resting=resting, c=cfg(naked_cap=50), suppressed=frozenset({"YES"}))
+    assert not any(q.side == "YES" for q in p.posts)
+    assert "y1" in p.cancels                       # existing YES rung pulled
+    assert any(q.side == "NO" for q in p.posts)    # NO unaffected

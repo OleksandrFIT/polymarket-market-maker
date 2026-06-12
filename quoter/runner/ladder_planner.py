@@ -52,6 +52,7 @@ def plan_ladder(
     resting: dict[str, list[RestingOrder]],
     cfg: Config,
     trend_bias: str = "NEUTRAL",
+    suppressed: frozenset[str] = frozenset(),
 ) -> LadderPlan:
     """Return the (cancels, posts) ladder plan for this tick. Pure + deterministic."""
     plan = LadderPlan()
@@ -105,6 +106,11 @@ def plan_ladder(
         desired["NO"] = []     # Up winning → Down is the loser
     elif trend_bias == "DOWN":
         desired["YES"] = []    # Down winning → Up is the loser
+
+    # Auto-flat: a side that was flattened this window is suppressed — post nothing
+    # (no rebuy → no churn, and stop loading the losing side).
+    for s in suppressed:
+        desired[s] = []
 
     for side in ("YES", "NO"):
         want = set(desired[side])
