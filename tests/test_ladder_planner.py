@@ -7,7 +7,7 @@ from quoter.runner.requote_planner import RestingOrder
 
 def cfg(**kw):
     base = dict(merge_edge=0.02, ladder_anchor="entry", rungs=5, rung_size=5,
-                rung_spacing=0.03, naked_cap=10, per_window_cap=12.0)
+                rung_spacing=0.03, naked_cap=50, per_window_cap=12.0)
     base.update(kw)
     return Config(**base)
 
@@ -55,10 +55,20 @@ def test_pair_ok_blocks_expensive_completion_of_held_leg():
 
 def test_naked_cap_pulls_heavier_side():
     resting = {"YES": [RestingOrder("y1", "YES", 0.44, 5)], "NO": []}
-    p = _plan(inv_yes=10, inv_no=0, yes_cost=10 * 0.30, committed=3.0, resting=resting)
+    p = _plan(inv_yes=10, inv_no=0, yes_cost=10 * 0.30, committed=3.0, resting=resting,
+              c=cfg(naked_cap=10))
     assert "y1" in p.cancels
     assert not any(q.side == "YES" for q in p.posts)
     assert any(q.side == "NO" for q in p.posts)
+
+
+def test_naked_cap_accounts_for_rung_size_no_overshoot():
+    # the live bug: naked already 5 with cap 8 — a 5-share rung would push to 10 > 8,
+    # so YES must NOT be posted (old `naked < cap` wrongly allowed it). NO has room.
+    c = cfg(naked_cap=8, max_inflight_rungs=3)
+    p = _plan(inv_yes=5, inv_no=0, yes_cost=5 * 0.44, committed=5 * 0.44, c=c)
+    assert not any(q.side == "YES" for q in p.posts)   # 5 + 5 = 10 > cap 8 → blocked
+    assert any(q.side == "NO" for q in p.posts)         # room (8+5)//5 = 2 rungs
 
 
 def test_capital_cap_pulls_everything():

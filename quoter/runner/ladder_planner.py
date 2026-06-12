@@ -83,19 +83,22 @@ def plan_ladder(
         other = yes_avg if (naked > 0 and yes_avg is not None) else (yes_rungs[0] if yes_rungs else 1.0)
         return (price + other) < 1.0
 
-    # Staged posting: desire only the next cfg.max_inflight_rungs rungs from the FILLED
-    # depth (inv // rung_size — shallowest rungs fill first as the price descends). A
-    # deeper rung is posted only once the shallower one fills, so a fast crash can sweep
-    # at most max_inflight_rungs * rung_size before the cap reacts (and post-only rejects
-    # a deeper rung once the market has crashed past it), instead of the whole ladder.
+    # HARD naked cap (lag-proof). Desire only as many rungs per side as can fill WITHOUT
+    # pushing the naked past naked_cap — accounting for the RUNG SIZE (the old `naked <
+    # cap` check let a rung fill at naked=cap-1 and overshoot by a full rung). The slot
+    # count uses the credited naked; during the credit grace a just-filled rung still sits
+    # in `resting` at the same (lagged) desired price, so the diff keeps it and we never
+    # re-post into the lag. Staged: also never more than max_inflight_rungs in flight.
     mif = cfg.max_inflight_rungs
     yd = int(inv_yes // cfg.rung_size)
     nd = int(inv_no // cfg.rung_size)
+    yes_slots = max(0, min(mif, (cfg.naked_cap - naked) // cfg.rung_size,
+                           (target - inv_yes) // cfg.rung_size))
+    no_slots = max(0, min(mif, (cfg.naked_cap + naked) // cfg.rung_size,
+                          (target - inv_no) // cfg.rung_size))
     desired: dict[str, list[float]] = {"YES": [], "NO": []}
-    if inv_yes < target and naked < cfg.naked_cap:
-        desired["YES"] = [p for p in yes_rungs[yd:yd + mif] if pair_ok("YES", p)]
-    if inv_no < target and -naked < cfg.naked_cap:
-        desired["NO"] = [p for p in no_rungs[nd:nd + mif] if pair_ok("NO", p)]
+    desired["YES"] = [p for p in yes_rungs[yd:yd + yes_slots] if pair_ok("YES", p)]
+    desired["NO"] = [p for p in no_rungs[nd:nd + no_slots] if pair_ok("NO", p)]
 
     # Trend detector: suppress the losing side's rungs (sit out the trend).
     if trend_bias == "UP":

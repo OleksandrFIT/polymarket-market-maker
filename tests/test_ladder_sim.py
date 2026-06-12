@@ -65,7 +65,11 @@ def test_naked_bounded_on_one_sided_dump():
 
 
 def test_cheap_pair_forms_on_two_sided_dips():
-    c = cfg()
+    # A 4-rung-deep dip (0.35 / 0.45) can only be caught by a ladder that rests that
+    # deep — which the lag-proof cap allows only when naked_cap covers the full depth
+    # (naked_cap // rung_size >= rungs). With a tight cap the ladder is intentionally
+    # shallow (the documented deep-ladder ↔ small-cap trade-off), so use a wide cap here.
+    c = cfg(naked_cap=25)
     sim = LadderSim(cfg=c, entry_mid=0.45)
     sim.tick(0.44, 0.54)
     sim.tick(0.44, 0.54, fills=[("YES", 0.35), ("NO", 0.45)])
