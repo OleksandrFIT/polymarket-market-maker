@@ -27,9 +27,12 @@ Side = str  # "YES" | "NO"
 
 @dataclass
 class LocalInventory:
-    """Optimistic per-side share + cost tracker. Monotonic in inventory: it only
-    ever goes up (we hold to resolution and never sell mid-window), so a lagging
-    low read can never trick the loop into re-buying a leg it already owns."""
+    """Optimistic per-side share + cost tracker. Inventory rises on fills
+    (``credit_fill``) and a lagging low chain read can never trick the loop into
+    re-buying a leg it already owns (``reconcile_up`` only ever raises). The one
+    intentional decrease is ``debit_fill`` — the auto-flat sell of the naked
+    excess; after a flatten the loop must skip ``reconcile_up`` on that side (the
+    chain read lags HIGH and would otherwise re-add the sold shares)."""
 
     inv: dict = field(default_factory=lambda: {"YES": 0, "NO": 0})
     cost: dict = field(default_factory=lambda: {"YES": 0.0, "NO": 0.0})
@@ -41,6 +44,26 @@ class LocalInventory:
         tick sees the higher inventory and the planner stops re-posting."""
         self.inv[side] += size
         self.cost[side] += size * price
+
+    def debit_fill(self, side: Side, size: int, price: float) -> None:
+        """We SOLD ``size`` shares of ``side`` (auto-flat). Reduce inventory and
+        its cost basis proportionally (by the average cost, so the remaining
+        shares keep their basis). This is the ONE place inventory goes DOWN — only
+        the naked excess is ever sold, never the paired core, so the post-debit
+        count stays >= the other side. Clamps at zero; never negative.
+
+        ``price`` is the sale price (logging / symmetry with ``credit_fill``); the
+        cost basis is reduced by the average, not the sale price — cash proceeds
+        are tracked by the live loop's collateral read, not here."""
+        size = min(size, self.inv[side])
+        if size <= 0:
+            return
+        avg = self.cost[side] / self.inv[side]
+        self.inv[side] -= size
+        self.cost[side] -= size * avg
+        if self.inv[side] <= 0:
+            self.inv[side] = 0
+            self.cost[side] = 0.0
 
     def reconcile_up(self, side: Side, chain_inv: int, est_price: float) -> None:
         """Raise the local count to the chain read when the chain is higher
