@@ -64,6 +64,7 @@ class ClobOps:
         size: int,
         side: str = "BUY",
         post_only: bool = True,
+        order_type: str = "GTC",
     ) -> dict | None:
         """Place a GTC limit order (V2). Returns ``{"order_id", "status"}`` or None."""
         client = self._build()
@@ -78,10 +79,11 @@ class ClobOps:
             size=int(size),
             side=Side.BUY if side == "BUY" else Side.SELL,
         )
+        ot = {"FOK": OrderType.FOK, "FAK": OrderType.FAK}.get(order_type, OrderType.GTC)
         try:
             signed = await asyncio.to_thread(client.create_order, args)
             resp = await asyncio.to_thread(
-                client.post_order, signed, OrderType.GTC, post_only
+                client.post_order, signed, ot, post_only
             )
             if not isinstance(resp, dict) or not resp.get("success"):
                 log.warning(

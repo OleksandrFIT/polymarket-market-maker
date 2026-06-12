@@ -437,9 +437,13 @@ class MergeRunner:
                             if dec:
                                 bid = yes_bid if dec.side == "YES" else no_bid
                                 tok = m.yes_token if dec.side == "YES" else m.no_token
+                                # FOK (all-or-nothing): an accepted order means a
+                                # full fill, so debiting the full qty is correct;
+                                # a thin book kills the order -> retry next tick
+                                # (naked stays bounded by naked_cap).
                                 r = await self.clob.place_limit(
                                     token_id=tok, price=bid, size=dec.qty,
-                                    side="SELL", post_only=False)
+                                    side="SELL", post_only=False, order_type="FOK")
                                 if r and r.get("order_id"):
                                     local.debit_fill(dec.side, dec.qty, bid)
                                     flattened.add(dec.side)
