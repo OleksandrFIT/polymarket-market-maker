@@ -47,6 +47,12 @@ class Config:
     max_inflight_rungs: int = 99  # staged posting: max rungs resting per side at once
                                   # (99 = all = legacy; run_control sets 1 to bound sweep)
 
+    # phase-24 auto-flat (kill-naked): sell the naked excess once it persists, then
+    # suppress that side for the window. Threshold reuses naked_cap.
+    auto_flat: bool = False           # OFF by default; run_control enables for live
+    flatten_grace_sec: float = 20.0   # naked must stand at cap this long before selling
+                                      # (lets a choppy imbalance pair up first)
+
     # phase-23 Binance trend detector
     trend_enabled: bool = True
     trend_confidence: float = 0.35    # THE knob: suppress a side when its win-prob < this
