@@ -30,14 +30,14 @@ from quoter.runner.control_dashboard import make_control_app
 CFG = Config(
     merge_edge=0.02, max_naked_shares=5, merge_levels=1,
     flat_size=5, per_market_cap_usd=6.0, min_time_to_expiry_sec=5.0,
-    # SMALL first-window test (user-cautious): 3 rungs → ~$13.8 ladder notional,
-    # naked_cap=5 → ~$2.5 real risk, per_window_cap=15 fits it. Scale to 5x5/cap25 later.
+    # SMALL first auto-flat test (user-cautious): 2 rungs → up to 10 shares/side
+    # (~$10/window), naked_cap=5 → ~$2.5 real risk, per_window_cap=15 fits it.
     # max_inflight_rungs=1 → staged posting: a fast crash sweeps at most 1 rung (5 sh),
     # not the whole ladder — fixes the live sweep that left 10 naked (−$3.75).
     # auto_flat=True: a naked leg that stands at naked_cap for flatten_grace_sec (20s)
     # is SOLD at market and that side is suppressed for the window — kills the naked
     # that lost 6/6 windows in the 2026-06-12 test. Grace lets choppy imbalances pair up.
-    ladder_anchor="entry", rungs=3, rung_size=5, rung_spacing=0.03,
+    ladder_anchor="entry", rungs=2, rung_size=5, rung_spacing=0.03,
     naked_cap=5, per_window_cap=15.0, max_inflight_rungs=1,
     auto_flat=True, flatten_grace_sec=20.0,
 )
