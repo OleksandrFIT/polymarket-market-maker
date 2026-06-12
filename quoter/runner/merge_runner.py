@@ -23,6 +23,7 @@ from quoter.runner.trading_state import TradingState
 from quoter.runner.requote_planner import RestingOrder, plan_requote
 from quoter.runner.local_inventory import LocalInventory
 from quoter.runner.ladder_planner import plan_ladder
+from quoter.runner.flatten_planner import plan_flatten
 from quoter.runner.trend_detector import detect_bias, sigma_remaining
 from quoter.feeds.binance_ws import BinanceWS
 
@@ -366,6 +367,8 @@ class MergeRunner:
         placed_at: dict[str, float] = {}     # order_id -> monotonic time placed
         last_px: dict[str, float] = {"YES": 0.0, "NO": 0.0}
         local = LocalInventory()
+        flattened: set[str] = set()
+        naked_since: dict[str, float | None] = {"YES": None, "NO": None}
         strike = self._btc_buf[-1][0] if self._btc_buf else None
 
         try:
@@ -401,14 +404,51 @@ class MergeRunner:
                         else:
                             kept.append(ro)
                     resting[side] = kept
-                local.reconcile_up("YES", chain_yes, last_px["YES"] or yes_bid)
-                local.reconcile_up("NO", chain_no, last_px["NO"] or no_bid)
+                # After a flatten the chain read lags HIGH (still shows the sold
+                # shares) — reconcile_up only raises, so it would re-add them. Skip
+                # the flattened side; our local count is authoritative there.
+                if "YES" not in flattened:
+                    local.reconcile_up("YES", chain_yes, last_px["YES"] or yes_bid)
+                if "NO" not in flattened:
+                    local.reconcile_up("NO", chain_no, last_px["NO"] or no_bid)
                 inv_yes, inv_no = local.inv["YES"], local.inv["NO"]
 
                 spent_bal = (coll_start - coll_now) if (coll_start >= 0 and coll_now >= 0) else 0.0
                 realized = max(spent_bal, local.cost["YES"] + local.cost["NO"])
                 resting_val = sum(ro.price * ro.size for s in ("YES", "NO") for ro in resting[s])
                 committed = max(0.0, realized) + resting_val
+
+                # Auto-flat: sell a naked leg that has PERSISTED at the cap past the
+                # grace (or once the window is nearly over), then suppress that side
+                # for the rest of the window. Mirrors test_ladder_sim's gate.
+                if self.cfg.auto_flat:
+                    naked = inv_yes - inv_no
+                    heavy = "YES" if naked > 0 else ("NO" if naked < 0 else None)
+                    for s in ("YES", "NO"):
+                        if s != heavy:
+                            naked_since[s] = None
+                    if heavy and abs(naked) >= self.cfg.naked_cap and heavy not in flattened:
+                        if naked_since[heavy] is None:
+                            naked_since[heavy] = now
+                        grace_done = (now - naked_since[heavy]) >= self.cfg.flatten_grace_sec
+                        near_end = m.time_remaining() <= self.cfg.flatten_grace_sec
+                        if grace_done or near_end:
+                            dec = plan_flatten(inv_yes, inv_no, self.cfg.naked_cap)
+                            if dec:
+                                bid = yes_bid if dec.side == "YES" else no_bid
+                                tok = m.yes_token if dec.side == "YES" else m.no_token
+                                r = await self.clob.place_limit(
+                                    token_id=tok, price=bid, size=dec.qty,
+                                    side="SELL", post_only=False)
+                                if r and r.get("order_id"):
+                                    local.debit_fill(dec.side, dec.qty, bid)
+                                    flattened.add(dec.side)
+                                    inv_yes, inv_no = local.inv["YES"], local.inv["NO"]
+                                    log.info("runner_ladder_flatten", slug=m.slug,
+                                             side=dec.side, qty=dec.qty,
+                                             price=round(bid, 3))
+                    elif heavy and abs(naked) < self.cfg.naked_cap:
+                        naked_since[heavy] = None
 
                 tbias = self._trend_bias(strike, m.time_remaining())
                 self.state.last_event = f"laddering {m.slug} (bias {tbias})"
@@ -417,7 +457,7 @@ class MergeRunner:
                     entry_mid=entry_mid, inv_yes=inv_yes, inv_no=inv_no,
                     yes_cost=local.cost["YES"], no_cost=local.cost["NO"],
                     committed=committed, resting=resting, cfg=self.cfg,
-                    trend_bias=tbias)
+                    trend_bias=tbias, suppressed=frozenset(flattened))
 
                 if plan.cancels:
                     await self.clob.cancel_orders(plan.cancels)
