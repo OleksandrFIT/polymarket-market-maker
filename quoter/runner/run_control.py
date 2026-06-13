@@ -34,12 +34,12 @@ CFG = Config(
     # (~$10/window), naked_cap=5 → ~$2.5 real risk, per_window_cap=15 fits it.
     # max_inflight_rungs=1 → staged posting: a fast crash sweeps at most 1 rung (5 sh),
     # not the whole ladder — fixes the live sweep that left 10 naked (−$3.75).
-    # auto_flat=True: a naked leg that stands at naked_cap for flatten_grace_sec (20s)
+    # auto_flat=True: a naked leg that stands at naked_cap for flatten_grace_sec (5s, proactive=like-competitor)
     # is SOLD at market and that side is suppressed for the window — kills the naked
     # that lost 6/6 windows in the 2026-06-12 test. Grace lets choppy imbalances pair up.
     ladder_anchor="entry", rungs=2, rung_size=5, rung_spacing=0.03,
     naked_cap=5, per_window_cap=15.0, max_inflight_rungs=1,
-    auto_flat=True, flatten_grace_sec=20.0,
+    auto_flat=True, flatten_grace_sec=5.0,
 )
 # Use continuous re-quoting (active two-sided market making) when trading.
 REQUOTE = True
