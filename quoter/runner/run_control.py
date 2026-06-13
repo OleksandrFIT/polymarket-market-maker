@@ -39,6 +39,7 @@ CFG = Config(
     # that lost 6/6 windows in the 2026-06-12 test. Grace lets choppy imbalances pair up.
     ladder_anchor="entry", rungs=2, rung_size=5, rung_spacing=0.03,
     naked_cap=5, per_window_cap=15.0, max_inflight_rungs=1,
+    min_buy_price=0.42,   # never catch a side below 0.42 (deep dip = likely falling knife)
     auto_flat=False, flatten_grace_sec=5.0,
     # trend detector active the WHOLE window (not just last 90s): suppress the LOSING
     # side throughout so the bot never buys the falling knife in a trend.

@@ -137,3 +137,13 @@ def test_suppressed_side_posts_nothing():
     assert not any(q.side == "YES" for q in p.posts)
     assert "y1" in p.cancels                       # existing YES rung pulled
     assert any(q.side == "NO" for q in p.posts)    # NO unaffected
+
+
+def test_min_buy_price_floor_drops_deep_rungs():
+    # with a 0.42 floor, rungs priced below 0.42 are never posted (no falling-knife catches)
+    c = cfg(naked_cap=50, min_buy_price=0.42)
+    p = _plan(c=c)
+    assert all(q.price >= 0.42 for q in p.posts)
+    # without the floor, deep rungs (0.35, 0.32...) WOULD be posted
+    p2 = _plan(c=cfg(naked_cap=50))
+    assert any(q.price < 0.42 for q in p2.posts)

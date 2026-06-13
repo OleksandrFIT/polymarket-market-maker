@@ -98,8 +98,10 @@ def plan_ladder(
     no_slots = max(0, min(mif, (cfg.naked_cap + naked) // cfg.rung_size,
                           (target - inv_no) // cfg.rung_size))
     desired: dict[str, list[float]] = {"YES": [], "NO": []}
-    desired["YES"] = [p for p in yes_rungs[yd:yd + yes_slots] if pair_ok("YES", p)]
-    desired["NO"] = [p for p in no_rungs[nd:nd + no_slots] if pair_ok("NO", p)]
+    desired["YES"] = [p for p in yes_rungs[yd:yd + yes_slots]
+                      if pair_ok("YES", p) and p >= cfg.min_buy_price]
+    desired["NO"] = [p for p in no_rungs[nd:nd + no_slots]
+                     if pair_ok("NO", p) and p >= cfg.min_buy_price]
 
     # Trend detector: suppress the losing side's rungs (sit out the trend).
     if trend_bias == "UP":

@@ -46,6 +46,9 @@ class Config:
     per_window_cap: float = 12.0  # $ ceiling on committed spend per window
     max_inflight_rungs: int = 99  # staged posting: max rungs resting per side at once
                                   # (99 = all = legacy; run_control sets 1 to bound sweep)
+    min_buy_price: float = 0.0    # never buy a side below this price (0 = no floor). A deep
+                                  # dip < floor = market says that side is the likely loser
+                                  # (a falling knife) → don't catch it. Costs the deep-cheap edge.
 
     # phase-24 auto-flat (kill-naked): sell the naked excess once it persists, then
     # suppress that side for the window. Threshold reuses naked_cap.
