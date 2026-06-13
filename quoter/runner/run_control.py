@@ -40,6 +40,9 @@ CFG = Config(
     ladder_anchor="entry", rungs=2, rung_size=5, rung_spacing=0.03,
     naked_cap=5, per_window_cap=15.0, max_inflight_rungs=1,
     auto_flat=False, flatten_grace_sec=5.0,
+    # trend detector active the WHOLE window (not just last 90s): suppress the LOSING
+    # side throughout so the bot never buys the falling knife in a trend.
+    trend_enabled=True, trend_confidence=0.40, trend_gate_sec=600.0,
 )
 # Use continuous re-quoting (active two-sided market making) when trading.
 REQUOTE = True
