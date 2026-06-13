@@ -355,7 +355,7 @@ class MergeRunner:
 
     async def _ladder_window(self, m, mid_at_entry: float) -> None:
         """LIVE laddered re-quoting: rest a deep ladder of bids both sides (anchor per
-        cfg.ladder_anchor), credit fills to LocalInventory, cap naked by pulling the
+        cfg.ladder_anchor), rebuild inventory from real fills, cap naked by pulling the
         heavier side's rungs. Operator-gated; the brain (plan_ladder) is sim-tested."""
         self._traded_windows.add(m.open_ts)
         self.state.windows_traded += 1
@@ -391,7 +391,6 @@ class MergeRunner:
                         await asyncio.sleep(REQUOTE_SEC)
                         continue
 
-                    chain_yes, chain_no = self._shares(m.yes_token), self._shares(m.no_token)
                     coll_now = self.collateral_usd()
                     now = monotonic()
 
@@ -429,6 +428,7 @@ class MergeRunner:
                             a = plan_naked_action(inv_yes, inv_no, inv.avg("YES"),
                                                   inv.avg("NO"), yes_ask, no_ask,
                                                   self.cfg.naked_cap)
+                            completed = False
                             if a and a.kind == "COMPLETE":
                                 tok = m.yes_token if a.side == "YES" else m.no_token
                                 px = yes_ask if a.side == "YES" else no_ask
@@ -437,19 +437,25 @@ class MergeRunner:
                                         token_id=tok, price=px, size=a.qty,
                                         side="BUY", post_only=False, order_type="FOK")
                                     if r and r.get("order_id"):
+                                        completed = True
+                                        naked_since[heavy] = None
                                         log.info("runner_ladder_complete", slug=m.slug,
                                                  side=a.side, qty=a.qty, price=round(px, 3))
-                                        naked_since[heavy] = None
-                            elif a and a.kind == "SELL":
-                                tok = m.yes_token if a.side == "YES" else m.no_token
-                                bid = yes_bid if a.side == "YES" else no_bid
-                                r = await self.clob.place_limit(
-                                    token_id=tok, price=bid, size=a.qty,
-                                    side="SELL", post_only=False, order_type="FOK")
-                                if r and r.get("order_id"):
-                                    flattened.add(a.side)
-                                    log.info("runner_ladder_flatten", slug=m.slug,
-                                             side=a.side, qty=a.qty, price=round(bid, 3))
+                            # SELL the heavy side when the plan says SELL, or when a COMPLETE
+                            # could not fill and the window is nearly over — never ride a
+                            # naked leg to resolution.
+                            if a and (a.kind == "SELL" or (not completed and near_end)):
+                                bid = yes_bid if heavy == "YES" else no_bid
+                                tok = m.yes_token if heavy == "YES" else m.no_token
+                                qty = abs(naked)
+                                if bid:
+                                    r = await self.clob.place_limit(
+                                        token_id=tok, price=bid, size=qty,
+                                        side="SELL", post_only=False, order_type="FOK")
+                                    if r and r.get("order_id"):
+                                        flattened.add(heavy)
+                                        log.info("runner_ladder_flatten", slug=m.slug,
+                                                 side=heavy, qty=qty, price=round(bid, 3))
                     elif heavy and abs(naked) < self.cfg.naked_cap:
                         naked_since[heavy] = None
 
