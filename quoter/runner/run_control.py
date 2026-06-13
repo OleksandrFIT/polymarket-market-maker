@@ -39,7 +39,7 @@ CFG = Config(
     # that lost 6/6 windows in the 2026-06-12 test. Grace lets choppy imbalances pair up.
     ladder_anchor="entry", rungs=2, rung_size=5, rung_spacing=0.03,
     naked_cap=5, per_window_cap=15.0, max_inflight_rungs=1,
-    auto_flat=True, flatten_grace_sec=5.0,
+    auto_flat=False, flatten_grace_sec=5.0,
 )
 # Use continuous re-quoting (active two-sided market making) when trading.
 REQUOTE = True
