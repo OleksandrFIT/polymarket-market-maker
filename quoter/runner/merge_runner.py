@@ -415,9 +415,13 @@ class MergeRunner:
                         inv_ok = True
                     except Exception:
                         inv_ok = False
-                    for side in ("YES", "NO"):
-                        local.reconcile_up(side, last_real.inv[side], last_px[side] or (yes_bid if side == "YES" else no_bid))
-                        local.reconcile_down(side, last_real.inv[side], now, self.cfg.inv_reconcile_grace_sec)
+                    # Only reconcile against a FRESH real-fills read. On a feed outage
+                    # `last_real` is stale (possibly low) — reconciling against it could
+                    # wrongly lower the optimistic count, so skip it this tick.
+                    if inv_ok:
+                        for side in ("YES", "NO"):
+                            local.reconcile_up(side, last_real.inv[side], last_px[side] or (yes_bid if side == "YES" else no_bid))
+                            local.reconcile_down(side, last_real.inv[side], now, self.cfg.inv_reconcile_grace_sec)
                     inv = local
                     inv_yes, inv_no = inv.inv["YES"], inv.inv["NO"]
 
