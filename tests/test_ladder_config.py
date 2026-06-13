@@ -26,3 +26,8 @@ def test_auto_flat_overridable():
     c = Config(auto_flat=True, flatten_grace_sec=30.0)
     assert c.auto_flat is True
     assert c.flatten_grace_sec == 30.0
+
+
+def test_inv_reconcile_grace_default():
+    c = Config()
+    assert c.inv_reconcile_grace_sec == 12.0
