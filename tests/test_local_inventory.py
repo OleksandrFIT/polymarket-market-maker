@@ -30,3 +30,30 @@ def test_debit_zero_or_empty_is_noop():
     inv = LocalInventory()
     inv.debit_fill("YES", 5, 0.30)     # nothing held
     assert inv.inv["YES"] == 0 and inv.cost["YES"] == 0.0
+
+
+def test_reconcile_down_lowers_after_grace():
+    inv = LocalInventory()
+    inv.credit_fill("NO", 10, 0.40)          # optimistic 10
+    inv.reconcile_down("NO", 5, now=0.0, grace=6.0)   # real=5, gap opens
+    assert inv.inv["NO"] == 10                          # not yet (grace not elapsed)
+    inv.reconcile_down("NO", 5, now=3.0, grace=6.0)
+    assert inv.inv["NO"] == 10                          # still within grace
+    inv.reconcile_down("NO", 5, now=6.0, grace=6.0)
+    assert inv.inv["NO"] == 5                            # persisted >= grace -> trust real
+    assert abs(inv.cost["NO"] - 5 * 0.40) < 1e-9        # cost scaled to remaining
+
+
+def test_reconcile_down_real_fill_not_reversed():
+    inv = LocalInventory()
+    inv.credit_fill("NO", 5, 0.40)           # optimistic 5 (a real fill, feed lags)
+    inv.reconcile_down("NO", 0, now=0.0, grace=6.0)    # real still 0 (lag) -> timer starts
+    inv.reconcile_down("NO", 5, now=3.0, grace=6.0)    # real catches up < grace
+    assert inv.inv["NO"] == 5                            # NOT reversed (gap cleared in time)
+
+
+def test_reconcile_down_noop_when_real_ge_local():
+    inv = LocalInventory()
+    inv.credit_fill("YES", 5, 0.50)
+    inv.reconcile_down("YES", 9, now=10.0, grace=6.0)  # real higher -> reconcile_down ignores
+    assert inv.inv["YES"] == 5

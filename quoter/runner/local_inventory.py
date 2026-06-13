@@ -36,6 +36,7 @@ class LocalInventory:
 
     inv: dict = field(default_factory=lambda: {"YES": 0, "NO": 0})
     cost: dict = field(default_factory=lambda: {"YES": 0.0, "NO": 0.0})
+    _over_since: dict = field(default_factory=lambda: {"YES": None, "NO": None})
 
     def credit_fill(self, side: Side, size: int, price: float) -> None:
         """Our resting order vanished and we did NOT cancel it → it filled.
@@ -74,6 +75,24 @@ class LocalInventory:
             diff = chain_inv - self.inv[side]
             self.cost[side] += diff * est_price
             self.inv[side] = chain_inv
+
+    def reconcile_down(self, side: Side, real_qty: int, now: float, grace: float) -> None:
+        """Phantom kill. If the optimistic local count exceeds the REAL-fills count
+        for longer than ``grace`` seconds, the excess credit was never confirmed by a
+        real fill (it was a phantom — a vanished-but-unfilled order) → lower local to
+        real. A genuine fill appears in the real feed within the feed lag (< grace),
+        clearing the gap before this triggers, so real fills are never reversed.
+        ``grace`` MUST exceed the real-fills feed lag."""
+        if self.inv[side] <= real_qty:
+            self._over_since[side] = None
+            return
+        if self._over_since[side] is None:
+            self._over_since[side] = now
+        elif now - self._over_since[side] >= grace:
+            avg = self.cost[side] / self.inv[side] if self.inv[side] > 0 else 0.0
+            self.inv[side] = real_qty
+            self.cost[side] = real_qty * avg
+            self._over_since[side] = None
 
     def avg(self, side: Side) -> float | None:
         """Average paid price on a held side (cost basis for the edge gate)."""
