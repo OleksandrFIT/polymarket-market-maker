@@ -1,24 +1,35 @@
-from quoter.runner.flatten_planner import plan_flatten, FlattenDecision
+from quoter.runner.flatten_planner import plan_naked_action, NakedAction
 
 
 def test_below_cap_returns_none():
-    assert plan_flatten(inv_yes=8, inv_no=5, naked_cap=5) is None  # naked 3 < 5
+    assert plan_naked_action(8, 5, 0.5, 0.5, 0.5, 0.5, naked_cap=5) is None  # naked 3 < 5
 
 
-def test_at_cap_yes_heavy_sells_yes_excess():
-    d = plan_flatten(inv_yes=10, inv_no=5, naked_cap=5)  # naked +5
-    assert d == FlattenDecision(side="YES", qty=5)
+def test_complete_when_other_side_cheap_yes_heavy():
+    # naked +5 (YES heavy), held YES avg 0.61, NO ask 0.36 -> pair 0.97 < 1 -> COMPLETE NO
+    a = plan_naked_action(10, 5, 0.61, None, 0.99, 0.36, naked_cap=5)
+    assert a == NakedAction(kind="COMPLETE", side="NO", qty=5)
 
 
-def test_no_heavy_sells_no_excess():
-    d = plan_flatten(inv_yes=5, inv_no=15, naked_cap=5)  # naked -10
-    assert d == FlattenDecision(side="NO", qty=10)
+def test_complete_when_other_side_cheap_no_heavy():
+    # naked -5 (NO heavy), held NO avg 0.40, YES ask 0.30 -> pair 0.70 < 1 -> COMPLETE YES
+    a = plan_naked_action(5, 10, None, 0.40, 0.30, 0.99, naked_cap=5)
+    assert a == NakedAction(kind="COMPLETE", side="YES", qty=5)
 
 
-def test_qty_equals_naked_leaves_pairs_intact():
-    d = plan_flatten(inv_yes=12, inv_no=4, naked_cap=5)  # naked +8
-    assert d.side == "YES" and d.qty == 8  # selling 8 leaves 4 YES / 4 NO = 4 pairs
+def test_sell_when_pair_would_exceed_one():
+    # naked +5, YES avg 0.61, NO ask 0.45 -> pair 1.06 >= 1 -> SELL the heavy YES
+    a = plan_naked_action(10, 5, 0.61, None, 0.99, 0.45, naked_cap=5)
+    assert a == NakedAction(kind="SELL", side="YES", qty=5)
 
 
-def test_balanced_returns_none():
-    assert plan_flatten(inv_yes=5, inv_no=5, naked_cap=5) is None
+def test_sell_fallback_when_ask_missing():
+    # no NO ask available -> cannot complete -> SELL heavy YES
+    a = plan_naked_action(10, 5, 0.61, None, 0.99, None, naked_cap=5)
+    assert a == NakedAction(kind="SELL", side="YES", qty=5)
+
+
+def test_sell_when_heavy_avg_unknown():
+    # heavy avg None (shouldn't happen, but be safe) -> cannot price completion -> SELL
+    a = plan_naked_action(10, 5, None, None, 0.99, 0.10, naked_cap=5)
+    assert a == NakedAction(kind="SELL", side="YES", qty=5)
