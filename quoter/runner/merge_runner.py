@@ -368,7 +368,8 @@ class MergeRunner:
         resting: dict[str, list[RestingOrder]] = {"YES": [], "NO": []}
         placed_at: dict[str, float] = {}     # order_id -> monotonic time placed
         last_px: dict[str, float] = {"YES": 0.0, "NO": 0.0}
-        last_inv = inventory_from_fills([])   # last good inventory (real fills)
+        local = LocalInventory()              # optimistic posting/cap inventory (sweep-proof)
+        last_real = inventory_from_fills([])   # last good real-fills inventory (phantom-kill)
         flattened: set[str] = set()
         naked_since: dict[str, float | None] = {"YES": None, "NO": None}
         strike = self._btc_buf[-1][0] if self._btc_buf else None
@@ -394,15 +395,30 @@ class MergeRunner:
                     coll_now = self.collateral_usd()
                     now = monotonic()
 
-                    # Rebuild inventory from REAL window fills (data-api). On a failed
-                    # read, reuse last good inventory and skip new posts this tick.
+                    # Credit OUR vanished-uncancelled rungs immediately (optimistic, lag-proof)
+                    # and drop them from resting so the ladder stays coherent.
+                    open_ids = self._open_order_ids()
+                    for side in ("YES", "NO"):
+                        kept = []
+                        for ro in resting[side]:
+                            if ro.order_id not in open_ids and (now - placed_at.get(ro.order_id, 0.0)) > REQUOTE_SEC:
+                                local.credit_fill(side, ro.size, ro.price)
+                                placed_at.pop(ro.order_id, None)
+                            else:
+                                kept.append(ro)
+                        resting[side] = kept
+                    # Reconcile the optimistic count against the REAL fills feed: raise to real
+                    # (caught fills), and lower to real after the grace (kills phantom credits).
                     try:
                         fills = await fetch_window_fills(self.creds.funder, m.slug, cl)
-                        last_inv = inventory_from_fills(fills)
+                        last_real = inventory_from_fills(fills)
                         inv_ok = True
                     except Exception:
-                        inv_ok = False     # reuse last_inv; skip new posts this tick
-                    inv = last_inv
+                        inv_ok = False
+                    for side in ("YES", "NO"):
+                        local.reconcile_up(side, last_real.inv[side], last_px[side] or (yes_bid if side == "YES" else no_bid))
+                        local.reconcile_down(side, last_real.inv[side], now, self.cfg.inv_reconcile_grace_sec)
+                    inv = local
                     inv_yes, inv_no = inv.inv["YES"], inv.inv["NO"]
 
                 spent_bal = (coll_start - coll_now) if (coll_start >= 0 and coll_now >= 0) else 0.0
@@ -494,8 +510,8 @@ class MergeRunner:
         finally:
             await self.cancel_all()
 
-        iy = max(self._shares(m.yes_token), last_inv.inv["YES"])
-        inn = max(self._shares(m.no_token), last_inv.inv["NO"])
+        iy = max(self._shares(m.yes_token), local.inv["YES"])
+        inn = max(self._shares(m.no_token), local.inv["NO"])
         self.state.last_event = f"ladder done: matched={min(iy, inn)} naked={abs(iy - inn)}"
         log.info("runner_ladder_done", slug=m.slug, matched=min(iy, inn), naked=abs(iy - inn))
 
