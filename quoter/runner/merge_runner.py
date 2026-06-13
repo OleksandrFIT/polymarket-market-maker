@@ -23,7 +23,9 @@ from quoter.runner.trading_state import TradingState
 from quoter.runner.requote_planner import RestingOrder, plan_requote
 from quoter.runner.local_inventory import LocalInventory
 from quoter.runner.ladder_planner import plan_ladder
-from quoter.runner.flatten_planner import plan_flatten
+from quoter.runner.flatten_planner import plan_naked_action
+from quoter.runner.fill_inventory import inventory_from_fills
+from quoter.runner.fills_feed import fetch_window_fills
 from quoter.runner.trend_detector import detect_bias, sigma_remaining
 from quoter.feeds.binance_ws import BinanceWS
 
@@ -366,7 +368,7 @@ class MergeRunner:
         resting: dict[str, list[RestingOrder]] = {"YES": [], "NO": []}
         placed_at: dict[str, float] = {}     # order_id -> monotonic time placed
         last_px: dict[str, float] = {"YES": 0.0, "NO": 0.0}
-        local = LocalInventory()
+        last_inv = inventory_from_fills([])   # last good inventory (real fills)
         flattened: set[str] = set()
         naked_since: dict[str, float | None] = {"YES": None, "NO": None}
         strike = self._btc_buf[-1][0] if self._btc_buf else None
@@ -376,52 +378,43 @@ class MergeRunner:
                 if self.state.force_stop_requested:
                     log.info("runner_ladder_force_break", slug=m.slug)
                     break
-                try:
-                    async with httpx.AsyncClient(timeout=6) as cl:
+                async with httpx.AsyncClient(timeout=6) as cl:
+                    try:
                         by = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.yes_token})).json()
                         bn = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.no_token})).json()
-                except Exception:
-                    await asyncio.sleep(REQUOTE_SEC)
-                    continue
-                yes_bid, no_bid = _best(by, "bids"), _best(bn, "bids")
-                yes_ask, no_ask = _best(by, "asks"), _best(bn, "asks")
-                if not yes_bid or not no_bid:
-                    await asyncio.sleep(REQUOTE_SEC)
-                    continue
+                    except Exception:
+                        await asyncio.sleep(REQUOTE_SEC)
+                        continue
+                    yes_bid, no_bid = _best(by, "bids"), _best(bn, "bids")
+                    yes_ask, no_ask = _best(by, "asks"), _best(bn, "asks")
+                    if not yes_bid or not no_bid:
+                        await asyncio.sleep(REQUOTE_SEC)
+                        continue
 
-                chain_yes, chain_no = self._shares(m.yes_token), self._shares(m.no_token)
-                coll_now = self.collateral_usd()
-                now = monotonic()
+                    chain_yes, chain_no = self._shares(m.yes_token), self._shares(m.no_token)
+                    coll_now = self.collateral_usd()
+                    now = monotonic()
 
-                # Credit filled rungs (vanished uncancelled), drop them from the list.
-                open_ids = self._open_order_ids()
-                for side in ("YES", "NO"):
-                    kept = []
-                    for ro in resting[side]:
-                        if ro.order_id not in open_ids and (now - placed_at.get(ro.order_id, 0.0)) > REQUOTE_SEC:
-                            local.credit_fill(side, ro.size, ro.price)
-                            placed_at.pop(ro.order_id, None)
-                        else:
-                            kept.append(ro)
-                    resting[side] = kept
-                # After a flatten the chain read lags HIGH (still shows the sold
-                # shares) — reconcile_up only raises, so it would re-add them. Skip
-                # the flattened side; our local count is authoritative there.
-                if "YES" not in flattened:
-                    local.reconcile_up("YES", chain_yes, last_px["YES"] or yes_bid)
-                if "NO" not in flattened:
-                    local.reconcile_up("NO", chain_no, last_px["NO"] or no_bid)
-                inv_yes, inv_no = local.inv["YES"], local.inv["NO"]
+                    # Rebuild inventory from REAL window fills (data-api). On a failed
+                    # read, reuse last good inventory and skip new posts this tick.
+                    try:
+                        fills = await fetch_window_fills(self.creds.funder, m.slug, cl)
+                        last_inv = inventory_from_fills(fills)
+                        inv_ok = True
+                    except Exception:
+                        inv_ok = False     # reuse last_inv; skip new posts this tick
+                    inv = last_inv
+                    inv_yes, inv_no = inv.inv["YES"], inv.inv["NO"]
 
                 spent_bal = (coll_start - coll_now) if (coll_start >= 0 and coll_now >= 0) else 0.0
-                realized = max(spent_bal, local.cost["YES"] + local.cost["NO"])
+                realized = max(spent_bal, inv.cost["YES"] + inv.cost["NO"])
                 resting_val = sum(ro.price * ro.size for s in ("YES", "NO") for ro in resting[s])
                 committed = max(0.0, realized) + resting_val
 
                 # Auto-flat: sell a naked leg that has PERSISTED at the cap past the
                 # grace (or once the window is nearly over), then suppress that side
                 # for the rest of the window. Mirrors test_ladder_sim's gate.
-                if self.cfg.auto_flat:
+                if self.cfg.auto_flat and inv_ok:
                     naked = inv_yes - inv_no
                     heavy = "YES" if naked > 0 else ("NO" if naked < 0 else None)
                     for s in ("YES", "NO"):
@@ -433,24 +426,30 @@ class MergeRunner:
                         grace_done = (now - naked_since[heavy]) >= self.cfg.flatten_grace_sec
                         near_end = m.time_remaining() <= self.cfg.flatten_grace_sec
                         if grace_done or near_end:
-                            dec = plan_flatten(inv_yes, inv_no, self.cfg.naked_cap)
-                            if dec:
-                                bid = yes_bid if dec.side == "YES" else no_bid
-                                tok = m.yes_token if dec.side == "YES" else m.no_token
-                                # FOK (all-or-nothing): an accepted order means a
-                                # full fill, so debiting the full qty is correct;
-                                # a thin book kills the order -> retry next tick
-                                # (naked stays bounded by naked_cap).
+                            a = plan_naked_action(inv_yes, inv_no, inv.avg("YES"),
+                                                  inv.avg("NO"), yes_ask, no_ask,
+                                                  self.cfg.naked_cap)
+                            if a and a.kind == "COMPLETE":
+                                tok = m.yes_token if a.side == "YES" else m.no_token
+                                px = yes_ask if a.side == "YES" else no_ask
+                                if px:
+                                    r = await self.clob.place_limit(
+                                        token_id=tok, price=px, size=a.qty,
+                                        side="BUY", post_only=False, order_type="FOK")
+                                    if r and r.get("order_id"):
+                                        log.info("runner_ladder_complete", slug=m.slug,
+                                                 side=a.side, qty=a.qty, price=round(px, 3))
+                                        naked_since[heavy] = None
+                            elif a and a.kind == "SELL":
+                                tok = m.yes_token if a.side == "YES" else m.no_token
+                                bid = yes_bid if a.side == "YES" else no_bid
                                 r = await self.clob.place_limit(
-                                    token_id=tok, price=bid, size=dec.qty,
+                                    token_id=tok, price=bid, size=a.qty,
                                     side="SELL", post_only=False, order_type="FOK")
                                 if r and r.get("order_id"):
-                                    local.debit_fill(dec.side, dec.qty, bid)
-                                    flattened.add(dec.side)
-                                    inv_yes, inv_no = local.inv["YES"], local.inv["NO"]
+                                    flattened.add(a.side)
                                     log.info("runner_ladder_flatten", slug=m.slug,
-                                             side=dec.side, qty=dec.qty,
-                                             price=round(bid, 3))
+                                             side=a.side, qty=a.qty, price=round(bid, 3))
                     elif heavy and abs(naked) < self.cfg.naked_cap:
                         naked_since[heavy] = None
 
@@ -459,7 +458,7 @@ class MergeRunner:
                 plan = plan_ladder(
                     yes_bid=yes_bid, no_bid=no_bid, yes_ask=yes_ask, no_ask=no_ask,
                     entry_mid=entry_mid, inv_yes=inv_yes, inv_no=inv_no,
-                    yes_cost=local.cost["YES"], no_cost=local.cost["NO"],
+                    yes_cost=inv.cost["YES"], no_cost=inv.cost["NO"],
                     committed=committed, resting=resting, cfg=self.cfg,
                     trend_bias=tbias, suppressed=frozenset(flattened))
 
@@ -469,6 +468,8 @@ class MergeRunner:
                         resting[side] = [ro for ro in resting[side] if ro.order_id not in plan.cancels]
 
                 for q in plan.posts:
+                    if not inv_ok:
+                        break               # inventory unknown this tick -> don't post
                     post_cost = q.price * q.size
                     if committed + post_cost > self.cfg.per_window_cap + 1e-9:
                         continue
@@ -487,8 +488,8 @@ class MergeRunner:
         finally:
             await self.cancel_all()
 
-        iy = max(self._shares(m.yes_token), local.inv["YES"])
-        inn = max(self._shares(m.no_token), local.inv["NO"])
+        iy = max(self._shares(m.yes_token), last_inv.inv["YES"])
+        inn = max(self._shares(m.no_token), last_inv.inv["NO"])
         self.state.last_event = f"ladder done: matched={min(iy, inn)} naked={abs(iy - inn)}"
         log.info("runner_ladder_done", slug=m.slug, matched=min(iy, inn), naked=abs(iy - inn))
 
