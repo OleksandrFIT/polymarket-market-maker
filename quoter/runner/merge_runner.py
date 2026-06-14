@@ -372,6 +372,14 @@ class MergeRunner:
         last_real = inventory_from_fills([])   # last good real-fills inventory (phantom-kill)
         flattened: set[str] = set()
         naked_since: dict[str, float | None] = {"YES": None, "NO": None}
+        # Lag-proof sweep backstop: count shares we actually POST per side this
+        # window (monotonic, never reset). Independent of the fill-inventory
+        # count, which reconcile_down can wrongly reset under data-api lag — the
+        # cause of the window-6 sweep (20 naked Up vs cap 5). Hard-caps one-sided
+        # posting so naked can never exceed naked_cap + rung_size, regardless of
+        # what the inventory count believes.
+        posted: dict[str, float] = {"YES": 0.0, "NO": 0.0}
+        post_cap = self.cfg.naked_cap + self.cfg.rung_size
         strike = self._btc_buf[-1][0] if self._btc_buf else None
 
         try:
@@ -496,6 +504,12 @@ class MergeRunner:
                 for q in plan.posts:
                     if not inv_ok:
                         break               # inventory unknown this tick -> don't post
+                    # Lag-proof sweep backstop: never post a side past the cap on
+                    # cumulative posted shares. This bounds worst-case naked even
+                    # if the inventory count is wrong, so a reset can no longer
+                    # re-open posting and sweep (window-6 bug).
+                    if posted[q.side] + q.size > post_cap + 1e-9:
+                        continue
                     post_cost = q.price * q.size
                     if committed + post_cost > self.cfg.per_window_cap + 1e-9:
                         continue
@@ -507,6 +521,7 @@ class MergeRunner:
                         placed_at[r["order_id"]] = now
                         last_px[q.side] = q.price
                         committed += post_cost
+                        posted[q.side] += q.size
 
                 self.state.pairs_caught = min(inv_yes, inv_no)
                 self.state.naked_shares = abs(inv_yes - inv_no)

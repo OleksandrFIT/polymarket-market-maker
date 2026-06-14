@@ -25,6 +25,8 @@ class LagSim:
     mode: str = "fixed"          # "lagged" (buggy) | "fixed" (optimistic+reconcile)
     feed_lag: int = 4            # ticks before a real fill is visible in the feed
     grace_ticks: float = 6.0
+    use_post_cap: bool = False   # lag-proof backstop: hard cap on cumulative posted shares
+    posted: dict = field(default_factory=lambda: {"YES": 0.0, "NO": 0.0})
     resting: dict = field(default_factory=lambda: {"YES": [], "NO": []})
     local: LocalInventory = field(default_factory=LocalInventory)   # optimistic (fixed)
     real_fills: list = field(default_factory=list)                  # delayed feed (visible)
@@ -64,9 +66,13 @@ class LagSim:
         for cid in plan.cancels:
             for s in ("YES", "NO"):
                 self.resting[s] = [ro for ro in self.resting[s] if ro.order_id != cid]
+        post_cap = self.cfg.naked_cap + self.cfg.rung_size
         for q in plan.posts:
+            if self.use_post_cap and self.posted[q.side] + q.size > post_cap + 1e-9:
+                continue
             self._oid += 1
             self.resting[q.side].append(RestingOrder(f"o{self._oid}", q.side, q.price, q.size))
+            self.posted[q.side] += q.size
         # 4. dump: every resting order on dump_side fills this tick
         if dump_side:
             for ro in list(self.resting[dump_side]):
@@ -107,6 +113,34 @@ def test_dump_sweep_bounded_in_fixed_mode():
     for _ in range(12):
         sim.tick(0.49, 0.49, dump_side="NO")
     assert sim.max_naked <= c.naked_cap + c.rung_size   # bounded
+
+
+def test_sweep_recurs_when_feed_lag_exceeds_grace():
+    # window-6 bug: the data-api lagged MORE than the reconcile grace, so reconcile_down
+    # wrongly treated REAL fills as phantoms and reset the count -> the inventory cap
+    # re-opened posting -> naked swept past the cap EVEN in 'fixed' mode. The
+    # optimistic+reconcile fix alone is NOT enough under heavy feed lag.
+    c = cfg(naked_cap=5)
+    # feed_lag exceeds the whole run: the data-api never confirms the fills during
+    # the dump (as in the real 5-min window), so reconcile_down resets the count
+    # every grace period and the planner re-opens NO posting each time.
+    sim = LagSim(cfg=c, entry_mid=0.50, mode="fixed", feed_lag=100, grace_ticks=6.0,
+                 use_post_cap=False)
+    for _ in range(30):
+        sim.tick(0.49, 0.49, dump_side="NO")
+    assert sim.max_naked > c.naked_cap + c.rung_size   # sweep recurs (>10)
+
+
+def test_sweep_bounded_by_post_cap_under_heavy_lag():
+    # the new lag-proof backstop: a hard cap on cumulative POSTED shares per side
+    # bounds naked even when reconcile_down resets the count under heavy feed lag,
+    # because it counts what we send (which we control), not what we believe filled.
+    c = cfg(naked_cap=5)
+    sim = LagSim(cfg=c, entry_mid=0.50, mode="fixed", feed_lag=100, grace_ticks=6.0,
+                 use_post_cap=True)
+    for _ in range(30):
+        sim.tick(0.49, 0.49, dump_side="NO")
+    assert sim.max_naked <= c.naked_cap + c.rung_size   # bounded by the post cap
 
 
 def test_phantom_corrected_after_grace():
