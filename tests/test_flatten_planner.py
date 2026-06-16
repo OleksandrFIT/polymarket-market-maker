@@ -80,3 +80,12 @@ def test_complete_cap_qty_bounds_cumulative():
     assert complete_cap_qty(5, 8, 10) == 2        # near cap -> partial
     assert complete_cap_qty(5, 0, 10) == 5        # under cap -> full request
     assert complete_cap_qty(10, 12, 10) == 0      # already over -> 0, never negative
+
+
+def test_balance_complete_qty_no_excess():
+    from quoter.runner.flatten_planner import balance_complete_qty
+    assert balance_complete_qty(5, 0) == 5     # naked 5, nothing done -> complete 5
+    assert balance_complete_qty(5, 5) == 0     # already completed 5 (lag) -> stop
+    assert balance_complete_qty(8, 5) == 3     # naked grew to 8 -> 3 more
+    assert balance_complete_qty(5, 8) == 0     # over-done -> 0, never negative
+    assert balance_complete_qty(0, 0) == 0

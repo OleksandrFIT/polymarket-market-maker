@@ -72,3 +72,13 @@ def complete_cap_qty(requested: float, already_completed: float, cap: float) -> 
     satisfying heavy_avg + light_ask < $1, and the gate (near_end) bypassed the
     cooldown so it re-bought every tick. Returns 0 when already at/over the cap."""
     return max(0.0, min(requested, cap - already_completed))
+
+
+def balance_complete_qty(naked: float, already_completed: float) -> float:
+    """Tighter completion cap: complete only enough to BALANCE the pair (reach the
+    heavy side), accounting for completes the lagging inventory hasn't absorbed yet
+    (``already_completed``). Light never exceeds heavy -> zero excess naked loser.
+    This is stricter than complete_cap_qty's fixed cap: it tracks the actual naked,
+    so a reversing/chop window can't leave a directional tilt (unlike the
+    competitor, who keeps one)."""
+    return max(0.0, naked - already_completed)

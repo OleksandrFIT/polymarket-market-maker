@@ -21,7 +21,12 @@ from quoter.markets import discover_markets
 from quoter.ops.logger import get_logger
 from quoter.runner.fill_inventory import inventory_from_fills
 from quoter.runner.fills_feed import fetch_window_fills
-from quoter.runner.flatten_planner import complete_cap_qty, naked_action_due, plan_naked_action
+from quoter.runner.flatten_planner import (
+    balance_complete_qty,
+    complete_cap_qty,
+    naked_action_due,
+    plan_naked_action,
+)
 from quoter.runner.ladder_planner import plan_ladder
 from quoter.runner.local_inventory import LocalInventory
 from quoter.runner.requote_planner import RestingOrder, plan_requote
@@ -476,11 +481,13 @@ class MergeRunner:
                                                   inv.avg("NO"), yes_ask, no_ask, thresh)
                             completed = False
                             if a and a.kind == "COMPLETE":
-                                # lag-proof cap: never complete-buy a side past
-                                # naked_cap + rung_size cumulatively (no chasing a
-                                # falling light leg into an over-bought naked loser).
-                                cq = complete_cap_qty(a.qty, completed_taker[a.side],
-                                                      self.cfg.naked_cap + self.cfg.rung_size)
+                                # tighter cap: complete only enough to BALANCE the pair
+                                # (light never exceeds heavy), accounting for completes
+                                # the lagging inventory hasn't absorbed yet -> zero excess
+                                # naked. complete_cap_qty stays as a hard lag-proof backstop.
+                                cq = min(balance_complete_qty(a.qty, completed_taker[a.side]),
+                                         complete_cap_qty(a.qty, completed_taker[a.side],
+                                                          self.cfg.naked_cap + self.cfg.rung_size))
                                 tok = m.yes_token if a.side == "YES" else m.no_token
                                 px = yes_ask if a.side == "YES" else no_ask
                                 if px and cq > 0:
