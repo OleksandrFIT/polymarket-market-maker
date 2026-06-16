@@ -42,3 +42,23 @@ def plan_naked_action(
             and (heavy_avg + light_ask) < 1.0):
         return NakedAction(kind="COMPLETE", side=light, qty=qty)
     return NakedAction(kind="SELL", side=heavy, qty=qty)
+
+
+def naked_action_due(cfg, naked: int, time_remaining: float,
+                     naked_since_heavy: float | None, now: float) -> bool:
+    """Pure: should the loop act on a naked leg (COMPLETE/SELL) this tick?
+
+    complete_pairs: act in the late window (last complete_gate_sec) on ANY naked.
+    auto_flat (legacy, unchanged): act once naked has stood at >= naked_cap past
+    flatten_grace_sec, or the window is within flatten_grace_sec of the end.
+    """
+    if naked == 0:
+        return False
+    if cfg.complete_pairs:
+        return time_remaining <= cfg.complete_gate_sec
+    if cfg.auto_flat:
+        if abs(naked) < cfg.naked_cap or naked_since_heavy is None:
+            return False
+        return ((now - naked_since_heavy) >= cfg.flatten_grace_sec
+                or time_remaining <= cfg.flatten_grace_sec)
+    return False

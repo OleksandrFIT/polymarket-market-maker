@@ -33,3 +33,35 @@ def test_sell_when_heavy_avg_unknown():
     # heavy avg None (shouldn't happen, but be safe) -> cannot price completion -> SELL
     a = plan_naked_action(10, 5, None, None, 0.99, 0.10, naked_cap=5)
     assert a == NakedAction(kind="SELL", side="YES", qty=5)
+
+
+from quoter.config import Config
+from quoter.runner.flatten_planner import naked_action_due
+
+
+def _cfg(**kw):
+    return Config(**kw)
+
+
+def test_due_false_when_flat():
+    c = _cfg(complete_pairs=True, complete_gate_sec=60.0)
+    assert naked_action_due(c, naked=0, time_remaining=10.0, naked_since_heavy=None, now=0.0) is False
+
+
+def test_complete_pairs_due_only_in_late_window():
+    c = _cfg(complete_pairs=True, complete_gate_sec=60.0)
+    assert naked_action_due(c, naked=5, time_remaining=120.0, naked_since_heavy=None, now=0.0) is False
+    assert naked_action_due(c, naked=5, time_remaining=45.0, naked_since_heavy=None, now=0.0) is True
+
+
+def test_legacy_auto_flat_unchanged():
+    c = _cfg(auto_flat=True, complete_pairs=False, naked_cap=5, flatten_grace_sec=20.0)
+    assert naked_action_due(c, naked=3, time_remaining=200.0, naked_since_heavy=10.0, now=15.0) is False
+    assert naked_action_due(c, naked=5, time_remaining=200.0, naked_since_heavy=10.0, now=15.0) is False
+    assert naked_action_due(c, naked=5, time_remaining=200.0, naked_since_heavy=10.0, now=40.0) is True
+    assert naked_action_due(c, naked=5, time_remaining=10.0, naked_since_heavy=10.0, now=15.0) is True
+
+
+def test_both_off_never_due():
+    c = _cfg(auto_flat=False, complete_pairs=False)
+    assert naked_action_due(c, naked=10, time_remaining=5.0, naked_since_heavy=0.0, now=100.0) is False
