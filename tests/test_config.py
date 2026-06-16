@@ -97,3 +97,10 @@ class TestPolyCreds:
             c = PolyCreds.from_env()
         auth = c.auth_dict()
         assert auth == {"apiKey": "key-uuid", "secret": "c2VjcmV0", "passphrase": "phrase"}
+
+
+def test_complete_pairs_defaults_off():
+    from quoter.config import Config
+    c = Config()
+    assert c.complete_pairs is False
+    assert c.complete_gate_sec == 60.0

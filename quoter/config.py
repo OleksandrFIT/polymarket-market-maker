@@ -55,6 +55,8 @@ class Config:
     auto_flat: bool = False           # OFF by default; run_control enables for live
     flatten_grace_sec: float = 20.0   # naked must stand at cap this long before selling
                                       # (lets a choppy imbalance pair up first)
+    complete_pairs: bool = False      # near-end COMPLETE(<$1)/SELL; never ride naked
+    complete_gate_sec: float = 60.0   # act only in the last N seconds of the window
     inv_reconcile_grace_sec: float = 12.0   # phantom-kill grace; MUST exceed data-api feed lag
 
     # phase-23 Binance trend detector
