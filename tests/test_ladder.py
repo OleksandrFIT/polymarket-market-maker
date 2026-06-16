@@ -106,3 +106,20 @@ def test_legacy_kwargs_ignored():
         velocity_short=0.5, prev_mid_yes=0.5, committed_side="YES",
     )
     assert b
+
+
+from quoter.runner.merge_runner import MergeRunner
+
+
+def test_discovery_cfg_uses_config_timeframe():
+    runner = MergeRunner.__new__(MergeRunner)   # bypass heavy __init__
+    runner.cfg = Config(assets=("BTC",), timeframes=("15m",))
+    dc = runner._discovery_cfg()
+    assert dc.timeframes == ("15m",)
+    assert dc.assets == ("BTC",)
+
+
+def test_discovery_cfg_defaults_5m():
+    runner = MergeRunner.__new__(MergeRunner)
+    runner.cfg = Config()
+    assert runner._discovery_cfg().timeframes == ("5m",)

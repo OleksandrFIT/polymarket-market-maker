@@ -23,7 +23,7 @@ from quoter.runner.trading_state import TradingState
 from quoter.runner.requote_planner import RestingOrder, plan_requote
 from quoter.runner.local_inventory import LocalInventory
 from quoter.runner.ladder_planner import plan_ladder
-from quoter.runner.flatten_planner import plan_naked_action
+from quoter.runner.flatten_planner import plan_naked_action, naked_action_due
 from quoter.runner.fill_inventory import inventory_from_fills
 from quoter.runner.fills_feed import fetch_window_fills
 from quoter.runner.trend_detector import detect_bias, sigma_remaining
@@ -146,9 +146,12 @@ class MergeRunner:
             log.warning("runner_cancel_all_err", error=str(e))
             return 0
 
+    def _discovery_cfg(self) -> Config:
+        """Config for market discovery — assets/timeframes come from our config."""
+        return Config(assets=self.cfg.assets, timeframes=self.cfg.timeframes)
+
     async def _current_window(self):
-        mk = await discover_markets(Config(assets=("BTC",), timeframes=("5m",)),
-                                    min_time_remaining_sec=5)
+        mk = await discover_markets(self._discovery_cfg(), min_time_remaining_sec=5)
         if not mk:
             return None, None
         m = mk[0]
@@ -438,24 +441,26 @@ class MergeRunner:
                 resting_val = sum(ro.price * ro.size for s in ("YES", "NO") for ro in resting[s])
                 committed = max(0.0, realized) + resting_val
 
-                # Auto-flat: sell a naked leg that has PERSISTED at the cap past the
-                # grace (or once the window is nearly over), then suppress that side
-                # for the rest of the window. Mirrors test_ladder_sim's gate.
-                if self.cfg.auto_flat and inv_ok:
+                if (self.cfg.auto_flat or self.cfg.complete_pairs) and inv_ok:
                     naked = inv_yes - inv_no
                     heavy = "YES" if naked > 0 else ("NO" if naked < 0 else None)
                     for s in ("YES", "NO"):
                         if s != heavy:
                             naked_since[s] = None
-                    if heavy and abs(naked) >= self.cfg.naked_cap and heavy not in flattened:
-                        if naked_since[heavy] is None:
+                    if heavy and heavy not in flattened:
+                        # legacy auto_flat tracks naked_since once at/over the cap
+                        if (self.cfg.auto_flat and not self.cfg.complete_pairs
+                                and abs(naked) >= self.cfg.naked_cap
+                                and naked_since[heavy] is None):
                             naked_since[heavy] = now
-                        grace_done = (now - naked_since[heavy]) >= self.cfg.flatten_grace_sec
-                        near_end = m.time_remaining() <= self.cfg.flatten_grace_sec
-                        if grace_done or near_end:
+                        due = naked_action_due(self.cfg, naked, m.time_remaining(),
+                                               naked_since[heavy], now)
+                        near_end = m.time_remaining() <= max(self.cfg.flatten_grace_sec,
+                                                             self.cfg.complete_gate_sec)
+                        if due:
+                            thresh = 1 if self.cfg.complete_pairs else self.cfg.naked_cap
                             a = plan_naked_action(inv_yes, inv_no, inv.avg("YES"),
-                                                  inv.avg("NO"), yes_ask, no_ask,
-                                                  self.cfg.naked_cap)
+                                                  inv.avg("NO"), yes_ask, no_ask, thresh)
                             completed = False
                             if a and a.kind == "COMPLETE":
                                 tok = m.yes_token if a.side == "YES" else m.no_token
@@ -469,9 +474,6 @@ class MergeRunner:
                                         naked_since[heavy] = None
                                         log.info("runner_ladder_complete", slug=m.slug,
                                                  side=a.side, qty=a.qty, price=round(px, 3))
-                            # SELL the heavy side when the plan says SELL, or when a COMPLETE
-                            # could not fill and the window is nearly over — never ride a
-                            # naked leg to resolution.
                             if a and (a.kind == "SELL" or (not completed and near_end)):
                                 bid = yes_bid if heavy == "YES" else no_bid
                                 tok = m.yes_token if heavy == "YES" else m.no_token
