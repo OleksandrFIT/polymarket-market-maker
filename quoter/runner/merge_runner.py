@@ -15,19 +15,19 @@ import httpx
 
 from quoter.config import Config
 from quoter.creds import PolyCreds
-from quoter.markets import discover_markets
-from quoter.strategy.ladder import compute_ladder
 from quoter.execution.clob_client import ClobOps
+from quoter.feeds.binance_ws import BinanceWS
+from quoter.markets import discover_markets
 from quoter.ops.logger import get_logger
-from quoter.runner.trading_state import TradingState
-from quoter.runner.requote_planner import RestingOrder, plan_requote
-from quoter.runner.local_inventory import LocalInventory
-from quoter.runner.ladder_planner import plan_ladder
-from quoter.runner.flatten_planner import plan_naked_action, naked_action_due
 from quoter.runner.fill_inventory import inventory_from_fills
 from quoter.runner.fills_feed import fetch_window_fills
+from quoter.runner.flatten_planner import naked_action_due, plan_naked_action
+from quoter.runner.ladder_planner import plan_ladder
+from quoter.runner.local_inventory import LocalInventory
+from quoter.runner.requote_planner import RestingOrder, plan_requote
+from quoter.runner.trading_state import TradingState
 from quoter.runner.trend_detector import detect_bias, sigma_remaining
-from quoter.feeds.binance_ws import BinanceWS
+from quoter.strategy.ladder import compute_ladder
 
 log = get_logger("merge_runner")
 
@@ -91,7 +91,7 @@ class MergeRunner:
 
     def _read_client(self):
         if self._rc is None:
-            from py_clob_client_v2 import ClobClient, ApiCreds
+            from py_clob_client_v2 import ApiCreds, ClobClient
             self._rc = ClobClient(
                 "https://clob.polymarket.com", 137, key=self.creds.private_key,
                 creds=ApiCreds(api_key=self.creds.api_key, api_secret=self.creds.api_secret,
@@ -100,7 +100,7 @@ class MergeRunner:
         return self._rc
 
     def collateral_usd(self) -> float:
-        from py_clob_client_v2 import BalanceAllowanceParams, AssetType
+        from py_clob_client_v2 import AssetType, BalanceAllowanceParams
         rc = self._read_client()
         try:
             b = rc.get_balance_allowance(BalanceAllowanceParams(
@@ -116,7 +116,7 @@ class MergeRunner:
             return -1
 
     def _shares(self, token: str) -> int:
-        from py_clob_client_v2 import BalanceAllowanceParams, AssetType
+        from py_clob_client_v2 import AssetType, BalanceAllowanceParams
         rc = self._read_client()
         try:
             b = rc.get_balance_allowance(BalanceAllowanceParams(
@@ -375,6 +375,7 @@ class MergeRunner:
         last_real = inventory_from_fills([])   # last good real-fills inventory (phantom-kill)
         flattened: set[str] = set()
         naked_since: dict[str, float | None] = {"YES": None, "NO": None}
+        last_naked_try: dict[str, float | None] = {"YES": None, "NO": None}
         # Lag-proof sweep backstop: count shares we actually POST per side this
         # window (monotonic, never reset). Independent of the fill-inventory
         # count, which reconcile_down can wrongly reset under data-api lag — the
@@ -455,9 +456,16 @@ class MergeRunner:
                             naked_since[heavy] = now
                         due = naked_action_due(self.cfg, naked, m.time_remaining(),
                                                naked_since[heavy], now)
+                        # near_end widens the SELL gate to flatten_grace if larger;
+                        # in complete_pairs mode due already implies near_end.
                         near_end = m.time_remaining() <= max(self.cfg.flatten_grace_sec,
                                                              self.cfg.complete_gate_sec)
-                        if due:
+                        cooldown_ok = (last_naked_try[heavy] is None
+                                       or (now - last_naked_try[heavy]) >= REQUOTE_SEC * 3)
+                        if due and (cooldown_ok or near_end):
+                            last_naked_try[heavy] = now
+                            # thresh=1: complete_pairs acts on ANY naked (>=1 share),
+                            # not just at naked_cap; legacy auto_flat uses naked_cap.
                             thresh = 1 if self.cfg.complete_pairs else self.cfg.naked_cap
                             a = plan_naked_action(inv_yes, inv_no, inv.avg("YES"),
                                                   inv.avg("NO"), yes_ask, no_ask, thresh)
