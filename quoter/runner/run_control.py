@@ -46,6 +46,7 @@ CFG = Config(
     # competitor runs 15m and COMPLETES pairs near the end. complete_pairs: in the
     # last complete_gate_sec, COMPLETE the pair if <$1 (taker the light leg) else
     # SELL the loser — never ride naked. 15m gives time for the 2nd leg to pair.
+    assets=("BTC",),   # BTC-only for the first 15m test (clean single-market)
     timeframes=("15m",),
     complete_pairs=True, complete_gate_sec=120.0,
     # trend detector active the WHOLE window (not just last 90s): suppress the LOSING
