@@ -41,6 +41,13 @@ CFG = Config(
     naked_cap=5, per_window_cap=15.0, max_inflight_rungs=1,
     min_buy_price=0.42,   # never catch a side below 0.42 (deep dip = likely falling knife)
     auto_flat=False, flatten_grace_sec=5.0,
+    # 15m + near-end pair completion (2026-06-16): real on-chain data showed the 5m
+    # ladder is structurally -EV (stuck-naked loser, 0/53), while the profitable
+    # competitor runs 15m and COMPLETES pairs near the end. complete_pairs: in the
+    # last complete_gate_sec, COMPLETE the pair if <$1 (taker the light leg) else
+    # SELL the loser — never ride naked. 15m gives time for the 2nd leg to pair.
+    timeframes=("15m",),
+    complete_pairs=True, complete_gate_sec=120.0,
     # trend detector active the WHOLE window (not just last 90s): suppress the LOSING
     # side throughout so the bot never buys the falling knife in a trend.
     trend_enabled=True, trend_confidence=0.40, trend_gate_sec=600.0,
