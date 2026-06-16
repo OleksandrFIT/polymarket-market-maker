@@ -62,6 +62,11 @@ def test_legacy_auto_flat_unchanged():
     assert naked_action_due(c, naked=5, time_remaining=10.0, naked_since_heavy=10.0, now=15.0) is True
 
 
+def test_auto_flat_at_cap_but_no_since_is_false():
+    c = Config(auto_flat=True, complete_pairs=False, naked_cap=5, flatten_grace_sec=20.0)
+    assert naked_action_due(c, naked=5, time_remaining=200.0, naked_since_heavy=None, now=100.0) is False
+
+
 def test_both_off_never_due():
     c = _cfg(auto_flat=False, complete_pairs=False)
     assert naked_action_due(c, naked=10, time_remaining=5.0, naked_since_heavy=0.0, now=100.0) is False
