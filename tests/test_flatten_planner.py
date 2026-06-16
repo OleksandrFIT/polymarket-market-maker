@@ -89,34 +89,3 @@ def test_balance_complete_qty_no_excess():
     assert balance_complete_qty(8, 5) == 3     # naked grew to 8 -> 3 more
     assert balance_complete_qty(5, 8) == 0     # over-done -> 0, never negative
     assert balance_complete_qty(0, 0) == 0
-
-
-def test_loser_sell_due():
-    from quoter.config import Config
-    from quoter.runner.flatten_planner import loser_sell_due
-    # disabled by default (loser_sell_sec=0) -> never
-    c0 = Config()
-    assert loser_sell_due(c0, naked=5, heavy_side="NO", bias="UP", completable=False, time_remaining=200) is False
-    c = Config(loser_sell_sec=300.0)
-    # naked Down (heavy NO) + bias UP => Down is loser, not completable, in window -> SELL
-    assert loser_sell_due(c, naked=-5, heavy_side="NO", bias="UP", completable=False, time_remaining=250) is True
-    # naked Up (heavy YES) + bias DOWN => Up loser -> SELL
-    assert loser_sell_due(c, naked=5, heavy_side="YES", bias="DOWN", completable=False, time_remaining=250) is True
-    # completable -> don't sell (complete instead)
-    assert loser_sell_due(c, naked=-5, heavy_side="NO", bias="UP", completable=True, time_remaining=250) is False
-    # bias confirms the naked side is the WINNER (not loser) -> don't sell early
-    assert loser_sell_due(c, naked=-5, heavy_side="NO", bias="DOWN", completable=False, time_remaining=250) is False
-    # too early (outside loser_sell_sec) -> no
-    assert loser_sell_due(c, naked=-5, heavy_side="NO", bias="UP", completable=False, time_remaining=400) is False
-    # neutral bias -> no confirmed loser -> no
-    assert loser_sell_due(c, naked=-5, heavy_side="NO", bias="NEUTRAL", completable=False, time_remaining=250) is False
-    # flat -> no
-    assert loser_sell_due(c, naked=0, heavy_side=None, bias="UP", completable=False, time_remaining=250) is False
-
-
-def test_robust_sell_price():
-    from quoter.runner.flatten_planner import robust_sell_price
-    # always returns the floor as the FOK limit (fills against any higher bid)
-    assert robust_sell_price(best_bid=0.40, floor=0.02) == 0.02
-    assert robust_sell_price(best_bid=None, floor=0.02) == 0.02
-    assert robust_sell_price(best_bid=0.01, floor=0.02) == 0.02

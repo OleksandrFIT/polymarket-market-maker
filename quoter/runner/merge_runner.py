@@ -24,10 +24,8 @@ from quoter.runner.fills_feed import fetch_window_fills
 from quoter.runner.flatten_planner import (
     balance_complete_qty,
     complete_cap_qty,
-    loser_sell_due,
     naked_action_due,
     plan_naked_action,
-    robust_sell_price,
 )
 from quoter.runner.ladder_planner import plan_ladder
 from quoter.runner.local_inventory import LocalInventory
@@ -450,7 +448,6 @@ class MergeRunner:
                 resting_val = sum(ro.price * ro.size for s in ("YES", "NO") for ro in resting[s])
                 committed = max(0.0, realized) + resting_val
 
-                tbias = self._trend_bias(strike, m.time_remaining())
                 if (self.cfg.auto_flat or self.cfg.complete_pairs) and inv_ok:
                     naked = inv_yes - inv_no
                     heavy = "YES" if naked > 0 else ("NO" if naked < 0 else None)
@@ -465,15 +462,6 @@ class MergeRunner:
                             naked_since[heavy] = now
                         due = naked_action_due(self.cfg, naked, m.time_remaining(),
                                                naked_since[heavy], now)
-                        # early loser-sell: a detector-confirmed loser naked that can't
-                        # complete <$1 is sold while still LIQUID (before it crashes to a
-                        # no-bid price and the gate FOK fails) -- live 1781641800 -$2.15.
-                        heavy_avg = inv.avg(heavy)
-                        light_ask = no_ask if heavy == "YES" else yes_ask
-                        completable = (heavy_avg is not None and light_ask is not None
-                                       and light_ask > 0 and (heavy_avg + light_ask) < 1.0)
-                        due = due or loser_sell_due(self.cfg, naked, heavy, tbias,
-                                                    completable, m.time_remaining())
                         # near_end widens the SELL gate to flatten_grace if larger;
                         # in complete_pairs mode due already implies near_end.
                         near_end = m.time_remaining() <= max(self.cfg.flatten_grace_sec,
@@ -518,23 +506,21 @@ class MergeRunner:
                                                and completed_taker[a.side] >= self.cfg.naked_cap + self.cfg.rung_size)
                             if a and (a.kind == "SELL"
                                       or (not completed and not complete_capped and near_end)):
+                                bid = yes_bid if heavy == "YES" else no_bid
                                 tok = m.yes_token if heavy == "YES" else m.no_token
                                 qty = abs(naked)
-                                bid = yes_bid if heavy == "YES" else no_bid
-                                # robust: place the FOK at a low floor so it fills against
-                                # ANY resting bid (fills at the best bid, not the floor) —
-                                # selling at the read bid failed when that bid vanished.
-                                sell_px = robust_sell_price(bid, self.cfg.sell_floor_price)
-                                r = await self.clob.place_limit(
-                                    token_id=tok, price=sell_px, size=qty,
-                                    side="SELL", post_only=False, order_type="FOK")
-                                if r and r.get("order_id"):
-                                    flattened.add(heavy)
-                                    log.info("runner_ladder_flatten", slug=m.slug,
-                                             side=heavy, qty=qty, price=round(sell_px, 3))
+                                if bid:
+                                    r = await self.clob.place_limit(
+                                        token_id=tok, price=bid, size=qty,
+                                        side="SELL", post_only=False, order_type="FOK")
+                                    if r and r.get("order_id"):
+                                        flattened.add(heavy)
+                                        log.info("runner_ladder_flatten", slug=m.slug,
+                                                 side=heavy, qty=qty, price=round(bid, 3))
                     elif heavy and abs(naked) < self.cfg.naked_cap:
                         naked_since[heavy] = None
 
+                tbias = self._trend_bias(strike, m.time_remaining())
                 self.state.last_event = f"laddering {m.slug} (bias {tbias})"
                 plan = plan_ladder(
                     yes_bid=yes_bid, no_bid=no_bid, yes_ask=yes_ask, no_ask=no_ask,

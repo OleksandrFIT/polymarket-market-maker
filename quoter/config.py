@@ -57,11 +57,6 @@ class Config:
                                       # (lets a choppy imbalance pair up first)
     complete_pairs: bool = False      # near-end COMPLETE(<$1)/SELL; never ride naked
     complete_gate_sec: float = 60.0   # act only in the last N seconds of the window
-    sell_floor_price: float = 0.02    # robust FOK-SELL limit: fills vs any bid >= this
-                                      # (a crashed loser had no bid at the read price)
-    loser_sell_sec: float = 0.0       # >0: sell a detector-confirmed loser naked this
-                                      # many sec before close (earlier than complete_gate,
-                                      # while still liquid). 0 = disabled (gate-only)
     inv_reconcile_grace_sec: float = 12.0   # phantom-kill grace; MUST exceed data-api feed lag
 
     # phase-23 Binance trend detector

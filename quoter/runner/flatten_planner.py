@@ -82,25 +82,3 @@ def balance_complete_qty(naked: float, already_completed: float) -> float:
     so a reversing/chop window can't leave a directional tilt (unlike the
     competitor, who keeps one)."""
     return max(0.0, naked - already_completed)
-
-
-def robust_sell_price(best_bid: float | None, floor: float = 0.02) -> float:
-    """FOK-SELL limit price: place at ``floor`` so the order fills against ANY
-    resting bid >= floor (the exchange fills at the best available bid, not the
-    floor). Selling at the read best_bid failed when that bid vanished or the book
-    read was empty, leaving a crashed loser leg to ride to resolution (live window
-    1781641800, -$2.15)."""
-    return floor
-
-
-def loser_sell_due(cfg, naked: float, heavy_side, bias: str, completable: bool,
-                   time_remaining: float) -> bool:
-    """Sell a detector-confirmed LOSER naked earlier than the complete gate, while
-    it is still liquid (before it crashes to a no-bid price). True only when:
-    enabled (loser_sell_sec>0), naked exists, the pair canNOT complete <$1, the
-    detector says the held naked side is the loser, and we're within loser_sell_sec.
-    bias 'UP' => Up wins => a NO (Down) naked is the loser; 'DOWN' => YES loser."""
-    if cfg.loser_sell_sec <= 0 or naked == 0 or completable or heavy_side is None:
-        return False
-    is_loser = (bias == "UP" and heavy_side == "NO") or (bias == "DOWN" and heavy_side == "YES")
-    return is_loser and time_remaining <= cfg.loser_sell_sec
