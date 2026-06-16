@@ -70,3 +70,13 @@ def test_auto_flat_at_cap_but_no_since_is_false():
 def test_both_off_never_due():
     c = _cfg(auto_flat=False, complete_pairs=False)
     assert naked_action_due(c, naked=10, time_remaining=5.0, naked_since_heavy=0.0, now=100.0) is False
+
+
+def test_complete_cap_qty_bounds_cumulative():
+    from quoter.runner.flatten_planner import complete_cap_qty
+    assert complete_cap_qty(10, 0, 10) == 10      # fresh -> full
+    assert complete_cap_qty(10, 6, 10) == 4       # 6 already done -> only 4 more
+    assert complete_cap_qty(10, 10, 10) == 0      # at cap -> nothing
+    assert complete_cap_qty(5, 8, 10) == 2        # near cap -> partial
+    assert complete_cap_qty(5, 0, 10) == 5        # under cap -> full request
+    assert complete_cap_qty(10, 12, 10) == 0      # already over -> 0, never negative

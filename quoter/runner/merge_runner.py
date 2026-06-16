@@ -21,7 +21,7 @@ from quoter.markets import discover_markets
 from quoter.ops.logger import get_logger
 from quoter.runner.fill_inventory import inventory_from_fills
 from quoter.runner.fills_feed import fetch_window_fills
-from quoter.runner.flatten_planner import naked_action_due, plan_naked_action
+from quoter.runner.flatten_planner import complete_cap_qty, naked_action_due, plan_naked_action
 from quoter.runner.ladder_planner import plan_ladder
 from quoter.runner.local_inventory import LocalInventory
 from quoter.runner.requote_planner import RestingOrder, plan_requote
@@ -376,6 +376,7 @@ class MergeRunner:
         flattened: set[str] = set()
         naked_since: dict[str, float | None] = {"YES": None, "NO": None}
         last_naked_try: dict[str, float | None] = {"YES": None, "NO": None}
+        completed_taker: dict[str, float] = {"YES": 0.0, "NO": 0.0}  # cumulative COMPLETE buys/side
         # Lag-proof sweep backstop: count shares we actually POST per side this
         # window (monotonic, never reset). Independent of the fill-inventory
         # count, which reconcile_down can wrongly reset under data-api lag — the
@@ -460,9 +461,13 @@ class MergeRunner:
                         # in complete_pairs mode due already implies near_end.
                         near_end = m.time_remaining() <= max(self.cfg.flatten_grace_sec,
                                                              self.cfg.complete_gate_sec)
+                        # cooldown ALWAYS applies (even near_end): the gate is long
+                        # vs the 6s cooldown, so a SELL still fires — but COMPLETE no
+                        # longer re-buys a crashing light leg every tick (the bug that
+                        # bought 20 Down vs 10 Up in live window 1781627400, -$2.10).
                         cooldown_ok = (last_naked_try[heavy] is None
                                        or (now - last_naked_try[heavy]) >= REQUOTE_SEC * 3)
-                        if due and (cooldown_ok or near_end):
+                        if due and cooldown_ok:
                             last_naked_try[heavy] = now
                             # thresh=1: complete_pairs acts on ANY naked (>=1 share),
                             # not just at naked_cap; legacy auto_flat uses naked_cap.
@@ -471,18 +476,29 @@ class MergeRunner:
                                                   inv.avg("NO"), yes_ask, no_ask, thresh)
                             completed = False
                             if a and a.kind == "COMPLETE":
+                                # lag-proof cap: never complete-buy a side past
+                                # naked_cap + rung_size cumulatively (no chasing a
+                                # falling light leg into an over-bought naked loser).
+                                cq = complete_cap_qty(a.qty, completed_taker[a.side],
+                                                      self.cfg.naked_cap + self.cfg.rung_size)
                                 tok = m.yes_token if a.side == "YES" else m.no_token
                                 px = yes_ask if a.side == "YES" else no_ask
-                                if px:
+                                if px and cq > 0:
                                     r = await self.clob.place_limit(
-                                        token_id=tok, price=px, size=a.qty,
+                                        token_id=tok, price=px, size=cq,
                                         side="BUY", post_only=False, order_type="FOK")
                                     if r and r.get("order_id"):
                                         completed = True
+                                        completed_taker[a.side] += cq
                                         naked_since[heavy] = None
                                         log.info("runner_ladder_complete", slug=m.slug,
-                                                 side=a.side, qty=a.qty, price=round(px, 3))
-                            if a and (a.kind == "SELL" or (not completed and near_end)):
+                                                 side=a.side, qty=cq, price=round(px, 3))
+                            # a COMPLETE that was capped to 0 (already completed enough)
+                            # is NOT a failed completion — don't fall through to SELL.
+                            complete_capped = (a is not None and a.kind == "COMPLETE"
+                                               and completed_taker[a.side] >= self.cfg.naked_cap + self.cfg.rung_size)
+                            if a and (a.kind == "SELL"
+                                      or (not completed and not complete_capped and near_end)):
                                 bid = yes_bid if heavy == "YES" else no_bid
                                 tok = m.yes_token if heavy == "YES" else m.no_token
                                 qty = abs(naked)

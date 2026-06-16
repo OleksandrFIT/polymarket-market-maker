@@ -62,3 +62,13 @@ def naked_action_due(cfg, naked: int, time_remaining: float,
         return ((now - naked_since_heavy) >= cfg.flatten_grace_sec
                 or time_remaining <= cfg.flatten_grace_sec)
     return False
+
+
+def complete_cap_qty(requested: float, already_completed: float, cap: float) -> float:
+    """Lag-proof bound on taker-COMPLETE buys: never let cumulative completes on a
+    side exceed ``cap`` (mirrors the maker post_cap). Stops the completion logic
+    from chasing a crashing light side into an over-bought naked loser — live
+    window 1781627400 completed 20 Down vs 10 Up because a falling light leg keeps
+    satisfying heavy_avg + light_ask < $1, and the gate (near_end) bypassed the
+    cooldown so it re-bought every tick. Returns 0 when already at/over the cap."""
+    return max(0.0, min(requested, cap - already_completed))
