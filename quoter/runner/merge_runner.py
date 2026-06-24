@@ -594,6 +594,12 @@ class MergeRunner:
                             side="BUY", post_only=False, order_type="FAK")
                         if r and r.get("order_id"):
                             posted[fav_side] += cq
+                            # account the tilt spend so the SAME-tick base-ladder
+                            # budget gate (committed + post_cost <= per_window_cap)
+                            # sees it; collateral re-read corrects it next tick.
+                            # Intended cost (cq*fav_ask): over-counts on partial FAK
+                            # fills, which is fail-safe for a cap.
+                            committed += cq * fav_ask
                             log.info("runner_tilt", slug=m.slug, side=fav_side,
                                      qty=cq, price=round(fav_ask, 3))
 
