@@ -55,6 +55,10 @@ def naked_action_due(cfg, naked: int, time_remaining: float,
     if naked == 0:
         return False
     if cfg.complete_pairs:
+        # continuous: act THROUGHOUT the window (small steps, balanced as we go);
+        # the SELL fallback is still gated to near-end by the live loop.
+        if getattr(cfg, "complete_continuous", False):
+            return True
         return time_remaining <= cfg.complete_gate_sec
     if cfg.auto_flat:
         if abs(naked) < cfg.naked_cap or naked_since_heavy is None:
@@ -72,6 +76,16 @@ def complete_cap_qty(requested: float, already_completed: float, cap: float) -> 
     satisfying heavy_avg + light_ask < $1, and the gate (near_end) bypassed the
     cooldown so it re-bought every tick. Returns 0 when already at/over the cap."""
     return max(0.0, min(requested, cap - already_completed))
+
+
+def recent_complete_qty(completes: list[tuple[float, float]], now: float,
+                        grace: float) -> float:
+    """Sum of completion qtys still inside the feed-lag window — the inventory read
+    may not yet reflect them, so subtract them from the naked to avoid double-buying.
+    Completes OLDER than ``grace`` are already absorbed into the naked count, so they
+    drop out — which is what makes CONTINUOUS completion lag-safe (unlike a cumulative
+    total, which would wrongly cancel legitimately-new naked later in the window)."""
+    return sum(q for (t, q) in completes if (now - t) < grace)
 
 
 def balance_complete_qty(naked: float, already_completed: float) -> float:

@@ -54,6 +54,25 @@ def test_pair_ok_blocks_expensive_completion_of_held_leg():
     assert 0.35 in yp and 0.32 in yp
 
 
+def test_deep_ladder_rests_static_deep_band_both_sides():
+    # deep mode: anchor at deep_top, full ladder both sides, narrow cheap band
+    c = cfg(deep_ladder=True, deep_top=0.15, rungs=7, rung_spacing=0.02,
+            merge_edge=0.0, min_buy_price=0.03, naked_cap=60, max_inflight_rungs=7)
+    p = _plan(yes_ask=0.99, no_ask=0.99, c=c)
+    assert _prices(p.posts, "YES") == [0.15, 0.13, 0.11, 0.09, 0.07, 0.05, 0.03]
+    assert _prices(p.posts, "NO") == [0.15, 0.13, 0.11, 0.09, 0.07, 0.05, 0.03]
+
+
+def test_deep_ladder_full_band_rests_despite_existing_inventory():
+    # near-mid slot logic would shrink slots as inventory grows; deep mode must NOT —
+    # it keeps the full static deep ladder resting so a later crash still fills it.
+    c = cfg(deep_ladder=True, deep_top=0.15, rungs=7, rung_spacing=0.02,
+            merge_edge=0.0, min_buy_price=0.03, naked_cap=60, max_inflight_rungs=7)
+    p = _plan(inv_no=20, no_cost=20 * 0.08, committed=20 * 0.08, yes_ask=0.99, no_ask=0.99, c=c)
+    assert len(_prices(p.posts, "NO")) == 7   # full ladder still desired
+    assert _prices(p.posts, "NO")[-1] == 0.03
+
+
 def test_naked_cap_pulls_heavier_side():
     resting = {"YES": [RestingOrder("y1", "YES", 0.44, 5)], "NO": []}
     p = _plan(inv_yes=10, inv_no=0, yes_cost=10 * 0.30, committed=3.0, resting=resting,

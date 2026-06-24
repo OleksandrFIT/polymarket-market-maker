@@ -26,6 +26,7 @@ from quoter.runner.flatten_planner import (
     complete_cap_qty,
     naked_action_due,
     plan_naked_action,
+    recent_complete_qty,
 )
 from quoter.runner.ladder_planner import plan_ladder
 from quoter.runner.local_inventory import LocalInventory
@@ -382,6 +383,9 @@ class MergeRunner:
         naked_since: dict[str, float | None] = {"YES": None, "NO": None}
         last_naked_try: dict[str, float | None] = {"YES": None, "NO": None}
         completed_taker: dict[str, float] = {"YES": 0.0, "NO": 0.0}  # cumulative COMPLETE buys/side
+        # continuous mode: per-side log of (time, qty) recent completes — only those
+        # inside the feed-lag window are subtracted from naked (lag-safe top-up).
+        complete_log: dict[str, list[tuple[float, float]]] = {"YES": [], "NO": []}
         # Lag-proof sweep backstop: count shares we actually POST per side this
         # window (monotonic, never reset). Independent of the fill-inventory
         # count, which reconcile_down can wrongly reset under data-api lag — the
@@ -389,8 +393,14 @@ class MergeRunner:
         # posting so naked can never exceed naked_cap + rung_size, regardless of
         # what the inventory count believes.
         posted: dict[str, float] = {"YES": 0.0, "NO": 0.0}
-        post_cap = self.cfg.naked_cap + self.cfg.rung_size
+        # In deep-ladder MEASUREMENT mode the share backstop is intentionally relaxed —
+        # the binding bound is per_window_cap (a REAL collateral-spend bound, lag-proof),
+        # so we can rest+repost the full static deep ladder. Normal mode keeps the tight
+        # lag-proof share cap that bounds the sweep bug.
+        post_cap = (10 ** 9 if self.cfg.deep_ladder
+                    else self.cfg.naked_cap + self.cfg.rung_size)
         strike = self._btc_buf[-1][0] if self._btc_buf else None
+        rtt_samples: list[float] = []   # book-fetch latency (2 GETs), ms — gauges queue speed
 
         try:
             while m.time_remaining() > END_BUFFER_SEC:
@@ -399,8 +409,10 @@ class MergeRunner:
                     break
                 async with httpx.AsyncClient(timeout=6) as cl:
                     try:
+                        _t_rtt = monotonic()
                         by = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.yes_token})).json()
                         bn = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.no_token})).json()
+                        rtt_samples.append((monotonic() - _t_rtt) * 1000.0)
                     except Exception:
                         await asyncio.sleep(REQUOTE_SEC)
                         continue
@@ -485,11 +497,27 @@ class MergeRunner:
                                 # (light never exceeds heavy), accounting for completes
                                 # the lagging inventory hasn't absorbed yet -> zero excess
                                 # naked. complete_cap_qty stays as a hard lag-proof backstop.
-                                cq = min(balance_complete_qty(a.qty, completed_taker[a.side]),
-                                         complete_cap_qty(a.qty, completed_taker[a.side],
-                                                          self.cfg.naked_cap + self.cfg.rung_size))
+                                if self.cfg.complete_continuous:
+                                    # CONTINUOUS: small step per shot, subtract only RECENT
+                                    # completes (within feed lag) so we can keep topping up
+                                    # new naked through the window. SELL stays near-end only.
+                                    recent = recent_complete_qty(complete_log[a.side], now,
+                                                                 self.cfg.inv_reconcile_grace_sec)
+                                    cq = min(balance_complete_qty(a.qty, recent),
+                                             float(self.cfg.complete_step))
+                                else:
+                                    cq = min(balance_complete_qty(a.qty, completed_taker[a.side]),
+                                             complete_cap_qty(a.qty, completed_taker[a.side],
+                                                              self.cfg.naked_cap + self.cfg.rung_size))
                                 tok = m.yes_token if a.side == "YES" else m.no_token
                                 px = yes_ask if a.side == "YES" else no_ask
+                                # Money bound: the completion is a TAKER buy and is NOT
+                                # gated by the per-post per_window_cap check below, so cap
+                                # its qty by the remaining $ budget — otherwise deep mode
+                                # (large naked cheap leg) could complete past per_window_cap.
+                                if px and px > 0:
+                                    budget_left = self.cfg.per_window_cap - realized
+                                    cq = float(int(min(cq, max(0.0, budget_left / px))))
                                 if px and cq > 0:
                                     r = await self.clob.place_limit(
                                         token_id=tok, price=px, size=cq,
@@ -497,15 +525,25 @@ class MergeRunner:
                                     if r and r.get("order_id"):
                                         completed = True
                                         completed_taker[a.side] += cq
+                                        if self.cfg.complete_continuous:
+                                            complete_log[a.side].append((now, cq))
                                         naked_since[heavy] = None
                                         log.info("runner_ladder_complete", slug=m.slug,
                                                  side=a.side, qty=cq, price=round(px, 3))
                             # a COMPLETE that was capped to 0 (already completed enough)
                             # is NOT a failed completion — don't fall through to SELL.
-                            complete_capped = (a is not None and a.kind == "COMPLETE"
+                            complete_capped = (not self.cfg.complete_continuous
+                                               and a is not None and a.kind == "COMPLETE"
                                                and completed_taker[a.side] >= self.cfg.naked_cap + self.cfg.rung_size)
-                            if a and (a.kind == "SELL"
-                                      or (not completed and not complete_capped and near_end)):
+                            # SELL gating. sell_fallback=False (guru-style) => NEVER sell: hold
+                            # the cheap residual to resolution (no FOK-in-no-bid loss path).
+                            # CONTINUOUS: even with sell_fallback, only sell near-end (never dump
+                            # the cheap leg mid-window — pair it later instead).
+                            near_end_sell = near_end if self.cfg.complete_continuous else True
+                            may_sell = self.cfg.sell_fallback and near_end_sell
+                            if a and ((a.kind == "SELL" and may_sell)
+                                      or (not completed and not complete_capped
+                                          and near_end and self.cfg.sell_fallback)):
                                 bid = yes_bid if heavy == "YES" else no_bid
                                 tok = m.yes_token if heavy == "YES" else m.no_token
                                 qty = abs(naked)
@@ -566,6 +604,29 @@ class MergeRunner:
         inn = max(self._shares(m.no_token), local.inv["NO"])
         self.state.last_event = f"ladder done: matched={min(iy, inn)} naked={abs(iy - inn)}"
         log.info("runner_ladder_done", slug=m.slug, matched=min(iy, inn), naked=abs(iy - inn))
+
+        # MEASUREMENT: the whole point of deep mode — at what price did WE actually catch
+        # each leg, and is the assembled pair < $1? (guru's cheap leg ≈ $0.07, pair ≈ $0.96)
+        avg_yes = (local.cost["YES"] / local.inv["YES"]) if local.inv["YES"] > 0 else None
+        avg_no = (local.cost["NO"] / local.inv["NO"]) if local.inv["NO"] > 0 else None
+        pairs = min(local.inv["YES"], local.inv["NO"])
+        total_cost = local.cost["YES"] + local.cost["NO"]
+        pair_cost = (total_cost / pairs) if pairs > 0 else None
+        cheap_leg = None
+        cheap_avg = None
+        if avg_yes is not None and avg_no is not None:
+            cheap_leg, cheap_avg = ("YES", avg_yes) if avg_yes <= avg_no else ("NO", avg_no)
+        log.info("runner_ladder_fillquality", slug=m.slug,
+                 inv_yes=local.inv["YES"], inv_no=local.inv["NO"],
+                 avg_yes=round(avg_yes, 3) if avg_yes is not None else None,
+                 avg_no=round(avg_no, 3) if avg_no is not None else None,
+                 cheap_leg=cheap_leg,
+                 cheap_avg=round(cheap_avg, 3) if cheap_avg is not None else None,
+                 pairs=pairs,
+                 pair_cost=round(pair_cost, 3) if pair_cost is not None else None,
+                 spent=round(total_cost, 2),
+                 rtt_ms_min=round(min(rtt_samples), 1) if rtt_samples else None,
+                 rtt_ms_avg=round(sum(rtt_samples) / len(rtt_samples), 1) if rtt_samples else None)
 
     def shutdown(self) -> None:
         self._shutdown = True

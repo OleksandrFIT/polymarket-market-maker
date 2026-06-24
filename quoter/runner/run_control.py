@@ -37,9 +37,19 @@ CFG = Config(
     # auto_flat=True: a naked leg that stands at naked_cap for flatten_grace_sec (5s, proactive=like-competitor)
     # is SOLD at market and that side is suppressed for the window — kills the naked
     # that lost 6/6 windows in the 2026-06-12 test. Grace lets choppy imbalances pair up.
-    ladder_anchor="entry", rungs=2, rung_size=5, rung_spacing=0.03,
-    naked_cap=5, per_window_cap=15.0, max_inflight_rungs=1,
-    min_buy_price=0.42,   # never catch a side below 0.42 (deep dip = likely falling knife)
+    # ── DEEP-LADDER MEASUREMENT mode (2026-06-17) ──────────────────────────────
+    # Real-tape sim (144 windows) proved: strategy = balanced pairs <$1 (same as guru),
+    # but the ENTIRE gap is the cheap leg — guru fills it at ~$0.07, our naive top-of-book
+    # at ~$0.32 (pair $1.02 → loses). This run MEASURES our REAL deep-catch fill price:
+    # rest a static deep ladder in the cheap band 0.03..0.15 (7 rungs × $0.02) BOTH sides,
+    # catch the loser's crash at our deep prices, log cheap-leg avg + pair cost per window.
+    # Money bound = per_window_cap $10 (≈ max risk/window). complete_pairs balances at end.
+    # PREV working near-mid cfg (revert): rungs=2, rung_spacing=0.03, naked_cap=5,
+    #   per_window_cap=15, max_inflight_rungs=1, min_buy_price=0.42, trend_enabled=True.
+    deep_ladder=True, deep_top=0.06,   # single rung lands at 0.05 (anchor - merge_edge/2)
+    ladder_anchor="entry", rungs=1, rung_size=5, rung_spacing=0.02,
+    naked_cap=60, per_window_cap=10.0, max_inflight_rungs=1,
+    min_buy_price=0.03,   # deep band floor
     auto_flat=False, flatten_grace_sec=5.0,
     # 15m + near-end pair completion (2026-06-16): real on-chain data showed the 5m
     # ladder is structurally -EV (stuck-naked loser, 0/53), while the profitable
@@ -49,9 +59,17 @@ CFG = Config(
     assets=("BTC",),   # BTC-only for the first 15m test (clean single-market)
     timeframes=("15m",),
     complete_pairs=True, complete_gate_sec=120.0,
+    # continuous completion: balance THROUGHOUT the window in small steps (10 sh) — cheaper
+    # favorite, more retry time, never a single last-minute shot. SELL still near-end only.
+    complete_continuous=True, complete_step=10,
+    # guru-style: NEVER sell (3000/3000 BUY on his wallet). Hold the cheap deep residual to
+    # resolution — removes the FOK-in-no-bid loss path and keeps the reversal-lottery upside.
+    sell_fallback=False,
     # trend detector active the WHOLE window (not just last 90s): suppress the LOSING
     # side throughout so the bot never buys the falling knife in a trend.
-    trend_enabled=True, trend_confidence=0.40, trend_gate_sec=600.0,
+    # trend detector OFF for the measurement: it would suppress the LOSING side's rungs,
+    # but the losing (crashing) side is exactly the cheap leg whose fill price we measure.
+    trend_enabled=False, trend_confidence=0.40, trend_gate_sec=600.0,
 )
 # Use continuous re-quoting (active two-sided market making) when trading.
 REQUOTE = True

@@ -50,6 +50,14 @@ class Config:
                                   # dip < floor = market says that side is the likely loser
                                   # (a falling knife) → don't catch it. Costs the deep-cheap edge.
 
+    # deep-ladder MEASUREMENT mode: rest a STATIC deep ladder both sides in a narrow
+    # cheap band (deep_top .. min_buy_price) to catch the loser's crash at the same
+    # deep prices the guru fills at (~$0.07). Bypasses the near-mid slot logic; the
+    # money bound is per_window_cap. Real $ risk per window ≈ per_window_cap. Used to
+    # measure OUR real cheap-leg fill price live before committing to a full rebuild.
+    deep_ladder: bool = False
+    deep_top: float = 0.15        # highest rung price in deep mode (anchor for both sides)
+
     # phase-24 auto-flat (kill-naked): sell the naked excess once it persists, then
     # suppress that side for the window. Threshold reuses naked_cap.
     auto_flat: bool = False           # OFF by default; run_control enables for live
@@ -57,6 +65,15 @@ class Config:
                                       # (lets a choppy imbalance pair up first)
     complete_pairs: bool = False      # near-end COMPLETE(<$1)/SELL; never ride naked
     complete_gate_sec: float = 60.0   # act only in the last N seconds of the window
+    complete_continuous: bool = False # complete THROUGHOUT the window in small steps (not
+                                      # one late shot): cheaper favorite + more retry time +
+                                      # continuously balanced. SELL still only near-end.
+    complete_step: int = 10           # max shares per completion shot (small = reliable fills)
+    sell_fallback: bool = True        # True (legacy): SELL the naked loser near-end if it can't
+                                      # be paired. False (guru-style): NEVER sell — HOLD the cheap
+                                      # residual to resolution. The guru's wallet shows 3000/3000
+                                      # BUY, 0 SELL: he holds losers to $0 (cheap) and keeps the
+                                      # reversal-lottery upside. Removes the FOK-in-no-bid loss path.
     inv_reconcile_grace_sec: float = 12.0   # phantom-kill grace; MUST exceed data-api feed lag
 
     # phase-23 Binance trend detector

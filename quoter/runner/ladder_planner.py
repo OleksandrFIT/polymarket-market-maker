@@ -64,7 +64,10 @@ def plan_ladder(
         return plan
 
     delta = cfg.merge_edge / 2.0
-    if cfg.ladder_anchor == "book":
+    if cfg.deep_ladder:
+        # MEASUREMENT mode: static deep band on BOTH sides, anchored at deep_top.
+        anchor_yes = anchor_no = cfg.deep_top
+    elif cfg.ladder_anchor == "book":
         anchor_yes, anchor_no = yes_bid, no_bid
     else:
         anchor_yes, anchor_no = entry_mid, (1.0 - entry_mid)
@@ -90,18 +93,25 @@ def plan_ladder(
     # count uses the credited naked; during the credit grace a just-filled rung still sits
     # in `resting` at the same (lagged) desired price, so the diff keeps it and we never
     # re-post into the lag. Staged: also never more than max_inflight_rungs in flight.
-    mif = cfg.max_inflight_rungs
-    yd = int(inv_yes // cfg.rung_size)
-    nd = int(inv_no // cfg.rung_size)
-    yes_slots = max(0, min(mif, (cfg.naked_cap - naked) // cfg.rung_size,
-                           (target - inv_yes) // cfg.rung_size))
-    no_slots = max(0, min(mif, (cfg.naked_cap + naked) // cfg.rung_size,
-                          (target - inv_no) // cfg.rung_size))
     desired: dict[str, list[float]] = {"YES": [], "NO": []}
-    desired["YES"] = [p for p in yes_rungs[yd:yd + yes_slots]
-                      if pair_ok("YES", p) and p >= cfg.min_buy_price]
-    desired["NO"] = [p for p in no_rungs[nd:nd + no_slots]
-                     if pair_ok("NO", p) and p >= cfg.min_buy_price]
+    if cfg.deep_ladder:
+        # Keep the FULL static deep ladder resting on both sides regardless of how much
+        # has filled — a later crash must still sweep our deep rungs. The money bound is
+        # per_window_cap (enforced in the runner), not the near-mid slot/naked logic.
+        desired["YES"] = [p for p in yes_rungs if pair_ok("YES", p) and p >= cfg.min_buy_price]
+        desired["NO"] = [p for p in no_rungs if pair_ok("NO", p) and p >= cfg.min_buy_price]
+    else:
+        mif = cfg.max_inflight_rungs
+        yd = int(inv_yes // cfg.rung_size)
+        nd = int(inv_no // cfg.rung_size)
+        yes_slots = max(0, min(mif, (cfg.naked_cap - naked) // cfg.rung_size,
+                               (target - inv_yes) // cfg.rung_size))
+        no_slots = max(0, min(mif, (cfg.naked_cap + naked) // cfg.rung_size,
+                              (target - inv_no) // cfg.rung_size))
+        desired["YES"] = [p for p in yes_rungs[yd:yd + yes_slots]
+                          if pair_ok("YES", p) and p >= cfg.min_buy_price]
+        desired["NO"] = [p for p in no_rungs[nd:nd + no_slots]
+                         if pair_ok("NO", p) and p >= cfg.min_buy_price]
 
     # Trend detector: suppress the losing side's rungs (sit out the trend).
     if trend_bias == "UP":

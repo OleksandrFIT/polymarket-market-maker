@@ -54,6 +54,26 @@ def test_complete_pairs_due_only_in_late_window():
     assert naked_action_due(c, naked=5, time_remaining=45.0, naked_since_heavy=None, now=0.0) is True
 
 
+def test_complete_continuous_due_throughout_window():
+    c = _cfg(complete_pairs=True, complete_continuous=True, complete_gate_sec=120.0)
+    # fires EARLY (not just last 120s) whenever naked != 0
+    assert naked_action_due(c, naked=5, time_remaining=800.0, naked_since_heavy=None, now=0.0) is True
+    assert naked_action_due(c, naked=5, time_remaining=45.0, naked_since_heavy=None, now=0.0) is True
+    assert naked_action_due(c, naked=0, time_remaining=800.0, naked_since_heavy=None, now=0.0) is False
+
+
+def test_recent_complete_qty_only_counts_within_lag():
+    from quoter.runner.flatten_planner import recent_complete_qty
+    log = [(0.0, 10.0), (5.0, 5.0), (18.0, 7.0)]
+    # at now=20, grace=12 -> only completes newer than t=8 count (the 18.0 one)
+    assert recent_complete_qty(log, now=20.0, grace=12.0) == 7.0
+    # at now=8, grace=12 -> 0.0 aged out (8-0=8<12 still in), 5.0 and... only past entries
+    assert recent_complete_qty([(0.0, 10.0), (5.0, 5.0)], now=8.0, grace=12.0) == 15.0
+    # at now=14: 0.0 aged out (14-0=14>=12), 5.0 in (9<12)
+    assert recent_complete_qty([(0.0, 10.0), (5.0, 5.0)], now=14.0, grace=12.0) == 5.0
+    assert recent_complete_qty([], now=6.0, grace=12.0) == 0.0
+
+
 def test_legacy_auto_flat_unchanged():
     c = _cfg(auto_flat=True, complete_pairs=False, naked_cap=5, flatten_grace_sec=20.0)
     assert naked_action_due(c, naked=3, time_remaining=200.0, naked_since_heavy=10.0, now=15.0) is False
