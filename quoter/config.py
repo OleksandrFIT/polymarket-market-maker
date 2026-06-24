@@ -91,12 +91,12 @@ class Config:
     # by rolling paper-EV/share (EV, not hit-rate: hit-rate is blind to entry price —
     # a favorite bought at 0.83 needs ~83% wins just to break even).
     tilt_enabled: bool = False
-    tilt_cutoff_sec: float = 45.0      # no taker tilt in the last N sec of the window
-    tilt_fee: float = 0.02            # taker spread estimate (CB EV + sizing margin)
-    tilt_max_price: float = 0.90      # don't chase the favorite above this ask
-    regime_window: int = 20           # rolling window of directional calls
-    regime_min_samples: int = 12      # shadow-only warm-up until this many windows
-    regime_min_ev: float = 0.01       # min paper tilt-EV/share to keep tilt enabled
+    tilt_cutoff_sec: float = 45.0     # no taker tilt in the last N sec of the window
+    tilt_fee: float = 0.02           # taker cost estimate (fee + sizing buffer)
+    tilt_max_price: float = 0.90     # don't chase the favorite above this ask
+    regime_window: int = 20          # rolling window of directional calls
+    regime_min_samples: int = 12     # shadow-only warm-up until this many windows
+    regime_min_ev: float = 0.01      # min paper tilt-EV/share to keep tilt enabled
 
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle

@@ -1,4 +1,3 @@
-# tests/test_config_tilt.py
 from quoter.config import Config
 
 
