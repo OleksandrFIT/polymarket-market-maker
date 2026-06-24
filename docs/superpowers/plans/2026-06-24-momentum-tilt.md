@@ -12,7 +12,7 @@
 
 **Деталь калібрування:** `insurance_frac` (≈25%) — НЕ рантайм-поле; страховка = не-пригнічена базова лузер-нога в межах `naked_cap`. Реплей-харнес (Task 4) калібрує `naked_cap`/`min_buy_price`, щоб досягти цілі.
 
-**Команди:** запуск тестів — `python3 -m pytest`. Працювати на гілці `feat/momentum-tilt` (вже створена).
+**Команди:** запуск тестів — `.venv/bin/python -m pytest` (НЕ системний python3 — pytest лише у venv). Скрипти теж через `.venv/bin/python`. Працювати на гілці `feat/momentum-tilt` (вже створена).
 
 ---
 
@@ -54,7 +54,7 @@ def test_tilt_fields_have_defaults():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m pytest tests/test_config_tilt.py -v`
+Run: `.venv/bin/python -m pytest tests/test_config_tilt.py -v`
 Expected: FAIL (`AttributeError: ... 'tilt_enabled'`)
 
 - [ ] **Step 3: Add the fields**
@@ -80,7 +80,7 @@ Expected: FAIL (`AttributeError: ... 'tilt_enabled'`)
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m pytest tests/test_config_tilt.py -v`
+Run: `.venv/bin/python -m pytest tests/test_config_tilt.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -140,7 +140,7 @@ def test_budget_exhausted_returns_zero():
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest tests/test_tilt_planner.py -v`
+Run: `.venv/bin/python -m pytest tests/test_tilt_planner.py -v`
 Expected: FAIL (`ModuleNotFoundError: quoter.runner.tilt_planner`)
 
 - [ ] **Step 3: Implement `plan_tilt`**
@@ -188,7 +188,7 @@ def plan_tilt(tbias: str, fav_ask: float | None, inv_fav: float, spent: float,
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/test_tilt_planner.py -v`
+Run: `.venv/bin/python -m pytest tests/test_tilt_planner.py -v`
 Expected: PASS (7 passed)
 
 - [ ] **Step 5: Commit**
@@ -261,7 +261,7 @@ def test_window_evicts_old():
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest tests/test_regime_tracker.py -v`
+Run: `.venv/bin/python -m pytest tests/test_regime_tracker.py -v`
 Expected: FAIL (`ModuleNotFoundError: quoter.runner.regime_tracker`)
 
 - [ ] **Step 3: Implement `RegimeTracker`**
@@ -317,7 +317,7 @@ class RegimeTracker:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/test_regime_tracker.py -v`
+Run: `.venv/bin/python -m pytest tests/test_regime_tracker.py -v`
 Expected: PASS (5 passed)
 
 - [ ] **Step 5: Commit**
@@ -450,7 +450,7 @@ print("\nCALIBRATE: set regime_min_ev so gated-EV stays >0; tilt_max_price near 
 
 - [ ] **Step 2: Run it and record numbers**
 
-Run: `python3 scripts/_replay_tilt.py 2>&1 | grep -vE "Deprecation"`
+Run: `.venv/bin/python scripts/_replay_tilt.py 2>&1 | grep -vE "Deprecation"`
 Expected: prints avg_fav_entry (~0.81), gated paper-EV/share (>0), false-pause rate.
 **Дія:** записати avg_fav_entry і gated-EV у коментар Task 6; якщо gated-EV ≤ 0 — підняти `regime_min_ev`; якщо false-pause надто високий (>30%) — знизити `regime_min_ev` чи `regime_min_samples`.
 
@@ -563,12 +563,12 @@ from quoter.runner.regime_tracker import RegimeTracker
 
 - [ ] **Step 6: Run the full suite — no regressions**
 
-Run: `python3 -m pytest -q`
+Run: `.venv/bin/python -m pytest -q`
 Expected: усі наявні тести + нові зелені.
 
 - [ ] **Step 7: Smoke-import the runner**
 
-Run: `python3 -c "from quoter.runner.merge_runner import MergeRunner; print('ok')"`
+Run: `.venv/bin/python -c "from quoter.runner.merge_runner import MergeRunner; print('ok')"`
 Expected: `ok`
 
 - [ ] **Step 8: Commit**
@@ -613,12 +613,12 @@ CFG = Config(
 
 - [ ] **Step 2: Smoke-run import (no live start)**
 
-Run: `python3 -c "import quoter.runner.run_control as r; print(r.CFG.tilt_enabled, r.CFG.per_window_cap)"`
+Run: `.venv/bin/python -c "import quoter.runner.run_control as r; print(r.CFG.tilt_enabled, r.CFG.per_window_cap)"`
 Expected: `True 15.0`
 
 - [ ] **Step 3: Full suite green**
 
-Run: `python3 -m pytest -q`
+Run: `.venv/bin/python -m pytest -q`
 Expected: усі зелені.
 
 - [ ] **Step 4: Commit**
@@ -634,12 +634,12 @@ git commit -m "feat(run_control): Крок-1 live config — base+tilt+CB, BTC 1
 
 - [ ] **Step 1: Full suite**
 
-Run: `python3 -m pytest -q`
+Run: `.venv/bin/python -m pytest -q`
 Expected: 0 failed.
 
 - [ ] **Step 2: Confirm no −EV deep-ladder remnants in live config**
 
-Run: `python3 -c "import quoter.runner.run_control as r; assert r.CFG.deep_ladder is False; assert r.CFG.trend_enabled and r.CFG.tilt_enabled; print('config ok')"`
+Run: `.venv/bin/python -c "import quoter.runner.run_control as r; assert r.CFG.deep_ladder is False; assert r.CFG.trend_enabled and r.CFG.tilt_enabled; print('config ok')"`
 Expected: `config ok`
 
 - [ ] **Step 3: Manual live validation (operator-gated, not automated)**
