@@ -84,6 +84,20 @@ class Config:
     trend_stale_sec: float = 10.0     # buffer newest entry older than this → NEUTRAL (fail-safe)
     trend_gate_sec: float = 90.0      # detector acts only in the last N sec of the window
 
+    # ── phase-25 momentum tilt (directional favorite accumulation) ──
+    # When trend_detector confirms a bias, TAKER-buy the favorite (side of the BTC
+    # move) toward favorite_shares ≈ spent. The base ladder is NOT trend-suppressed
+    # (it keeps a moderate loser leg = insurance). A circuit-breaker pauses the tilt
+    # by rolling paper-EV/share (EV, not hit-rate: hit-rate is blind to entry price —
+    # a favorite bought at 0.83 needs ~83% wins just to break even).
+    tilt_enabled: bool = False
+    tilt_cutoff_sec: float = 45.0      # no taker tilt in the last N sec of the window
+    tilt_fee: float = 0.02            # taker spread estimate (CB EV + sizing margin)
+    tilt_max_price: float = 0.90      # don't chase the favorite above this ask
+    regime_window: int = 20           # rolling window of directional calls
+    regime_min_samples: int = 12      # shadow-only warm-up until this many windows
+    regime_min_ev: float = 0.01       # min paper tilt-EV/share to keep tilt enabled
+
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle
     requote_on_mid_move_cents: int = 1
