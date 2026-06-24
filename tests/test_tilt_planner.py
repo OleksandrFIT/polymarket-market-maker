@@ -16,8 +16,18 @@ def test_above_max_price_returns_zero():
 
 
 def test_already_enough_returns_zero():
-    # inv_fav >= spent → gap <= 0
+    # inv_fav > spent → gap < 0
     assert plan_tilt("UP", 0.7, 10, 5.0, 15.0, 10) == 0.0
+
+
+def test_gap_exactly_zero_returns_zero():
+    # inv_fav == spent → gap == 0 (boundary of the gap <= 0 guard)
+    assert plan_tilt("UP", 0.7, 5, 5.0, 15.0, 10) == 0.0
+
+
+def test_down_bias_sizes_symmetrically():
+    # DOWN is treated identically to UP after the first guard
+    assert plan_tilt("DOWN", 0.6, 0, 8.0, 100.0, 10) == 10.0
 
 
 def test_sizes_toward_spent_capped_by_step():
