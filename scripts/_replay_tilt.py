@@ -7,7 +7,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from quoter.config import Config
 from quoter.runner.trend_detector import detect_bias, sigma_remaining
 from quoter.runner.regime_tracker import RegimeTracker
-from quoter.runner.tilt_planner import plan_tilt
 
 UA = {"User-Agent": "Mozilla/5.0"}
 DIRS = ["/tmp/poly_path15_cache", "/tmp/poly_path15_oos"]
