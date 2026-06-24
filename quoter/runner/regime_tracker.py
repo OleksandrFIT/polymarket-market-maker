@@ -2,9 +2,9 @@
 
 Tracks the last `window` directional calls as (predicted_fav, fav_entry_price, winner)
 and computes the paper EV/share of the tilt (with taker fee). Tilt is enabled ONLY
-after a shadow-only warm-up of `min_samples` windows AND while paper-EV >= `min_ev`.
+after a shadow-only warm-up of `min_samples` recorded calls AND while paper-EV >= `min_ev`.
 EV (not hit-rate) is the gate: hit-rate is blind to entry price — a favorite bought
-at 0.83 needs ~83% wins just to break even. Pure, no I/O.
+at 0.83 needs ~85% wins (= entry + fee) just to break even. Pure, no I/O.
 """
 from __future__ import annotations
 
