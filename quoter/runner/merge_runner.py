@@ -33,6 +33,8 @@ from quoter.runner.local_inventory import LocalInventory
 from quoter.runner.requote_planner import RestingOrder, plan_requote
 from quoter.runner.trading_state import TradingState
 from quoter.runner.trend_detector import detect_bias, sigma_remaining
+from quoter.runner.tilt_planner import plan_tilt
+from quoter.runner.regime_tracker import RegimeTracker
 from quoter.strategy.ladder import compute_ladder
 
 log = get_logger("merge_runner")
@@ -75,6 +77,8 @@ class MergeRunner:
         self._shutdown = False
         self._btc_buf: list[tuple[float, float]] = []   # (price, monotonic_ts)
         self._binance = BinanceWS(("BTC",), self._on_btc) if cfg.trend_enabled else None
+        self._regime = RegimeTracker(cfg.regime_window, cfg.regime_min_samples,
+                                     cfg.regime_min_ev, cfg.tilt_fee)
         self._binance_task = None
 
     async def _on_btc(self, asset: str, price: float, ts: float) -> None:
@@ -400,6 +404,9 @@ class MergeRunner:
         post_cap = (10 ** 9 if self.cfg.deep_ladder
                     else self.cfg.naked_cap + self.cfg.rung_size)
         strike = self._btc_buf[-1][0] if self._btc_buf else None
+        last_bias = "NEUTRAL"          # last non-NEUTRAL detector call this window
+        last_fav_entry = 0.0           # favorite ask at that call (shadow/real entry)
+        last_mid = mid_at_entry        # last seen YES mid (for end-of-window winner)
         rtt_samples: list[float] = []   # book-fetch latency (2 GETs), ms — gauges queue speed
 
         try:
@@ -559,13 +566,45 @@ class MergeRunner:
                         naked_since[heavy] = None
 
                 tbias = self._trend_bias(strike, m.time_remaining())
+                # track shadow entry for the circuit-breaker (even when tilt is paused)
+                if tbias != "NEUTRAL":
+                    last_bias = tbias
+                    fav_ask_now = yes_ask if tbias == "UP" else no_ask
+                    if fav_ask_now:
+                        last_fav_entry = fav_ask_now
+                if yes_bid and yes_ask:
+                    last_mid = (yes_bid + yes_ask) / 2
+
+                # DIRECTIONAL TILT: taker-buy the favorite when the trend is confirmed
+                # AND the circuit-breaker says the edge is alive. Base stays two-sided
+                # (insurance leg) — tilt is the only thing that uses the bias.
+                if (self.cfg.tilt_enabled and tbias != "NEUTRAL"
+                        and self._regime.directional_enabled()
+                        and m.time_remaining() > self.cfg.tilt_cutoff_sec):
+                    fav_side = "YES" if tbias == "UP" else "NO"
+                    fav_ask = yes_ask if fav_side == "YES" else no_ask
+                    inv_fav = inv_yes if fav_side == "YES" else inv_no
+                    cq = plan_tilt(tbias, fav_ask, inv_fav, realized,
+                                   self.cfg.per_window_cap, self.cfg.complete_step,
+                                   self.cfg.tilt_max_price)
+                    if cq > 0 and fav_ask:
+                        tok = m.yes_token if fav_side == "YES" else m.no_token
+                        r = await self.clob.place_limit(
+                            token_id=tok, price=fav_ask, size=cq,
+                            side="BUY", post_only=False, order_type="FAK")
+                        if r and r.get("order_id"):
+                            posted[fav_side] += cq
+                            log.info("runner_tilt", slug=m.slug, side=fav_side,
+                                     qty=cq, price=round(fav_ask, 3))
+
                 self.state.last_event = f"laddering {m.slug} (bias {tbias})"
+                # base ladder: NEUTRAL → never trend-suppress the loser (= insurance leg)
                 plan = plan_ladder(
                     yes_bid=yes_bid, no_bid=no_bid, yes_ask=yes_ask, no_ask=no_ask,
                     entry_mid=entry_mid, inv_yes=inv_yes, inv_no=inv_no,
                     yes_cost=inv.cost["YES"], no_cost=inv.cost["NO"],
                     committed=committed, resting=resting, cfg=self.cfg,
-                    trend_bias=tbias, suppressed=frozenset(flattened))
+                    trend_bias="NEUTRAL", suppressed=frozenset(flattened))
 
                 if plan.cancels:
                     await self.clob.cancel_orders(plan.cancels)
@@ -604,6 +643,14 @@ class MergeRunner:
         inn = max(self._shares(m.no_token), local.inv["NO"])
         self.state.last_event = f"ladder done: matched={min(iy, inn)} naked={abs(iy - inn)}"
         log.info("runner_ladder_done", slug=m.slug, matched=min(iy, inn), naked=abs(iy - inn))
+        if last_bias != "NEUTRAL":
+            winner = "Up" if last_mid >= 0.5 else "Down"
+            pred = "Up" if last_bias == "UP" else "Down"
+            self._regime.record(pred, last_fav_entry, winner)
+            log.info("runner_regime_record", slug=m.slug, pred=pred,
+                     entry=round(last_fav_entry, 3), winner=winner,
+                     paper_ev=round(self._regime.paper_ev() or 0.0, 4),
+                     enabled=self._regime.directional_enabled())
 
         # MEASUREMENT: the whole point of deep mode — at what price did WE actually catch
         # each leg, and is the assembled pair < $1? (guru's cheap leg ≈ $0.07, pair ≈ $0.96)
