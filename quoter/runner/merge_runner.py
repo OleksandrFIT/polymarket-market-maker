@@ -543,6 +543,12 @@ class MergeRunner:
                                     if r and r.get("order_id"):
                                         completed = True
                                         completed_taker[a.side] += cq
+                                        # account completion spend in the SAME tick so the
+                                        # later tilt gate (realized) and base gate (committed)
+                                        # don't double-spend against one stale collateral
+                                        # snapshot. Collateral re-read corrects it next tick.
+                                        realized += cq * px
+                                        committed += cq * px
                                         if self.cfg.complete_continuous:
                                             complete_log[a.side].append((now, cq))
                                         naked_since[heavy] = None
