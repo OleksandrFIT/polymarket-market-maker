@@ -467,6 +467,10 @@ class MergeRunner:
                 resting_val = sum(ro.price * ro.size for s in ("YES", "NO") for ro in resting[s])
                 committed = max(0.0, realized) + resting_val
 
+                # Trend bias computed once per tick: gates BOTH the completion guard
+                # below (don't pair off a deliberate tilt) and the directional tilt block.
+                tbias = self._trend_bias(strike, m.time_remaining())
+
                 if (self.cfg.auto_flat or self.cfg.complete_pairs) and inv_ok:
                     naked = inv_yes - inv_no
                     heavy = "YES" if naked > 0 else ("NO" if naked < 0 else None)
@@ -499,7 +503,14 @@ class MergeRunner:
                             a = plan_naked_action(inv_yes, inv_no, inv.avg("YES"),
                                                   inv.avg("NO"), yes_ask, no_ask, thresh)
                             completed = False
-                            if a and a.kind == "COMPLETE":
+                            # Don't pair off a DELIBERATE directional tilt: when the heavy
+                            # side is the favorite (tbias direction), completing buys the
+                            # loser and unwinds the net-long-favorite edge — let it ride.
+                            # When the LOSER is heavy, completion buys the favorite cheap
+                            # (aligned + merge edge) and proceeds normally.
+                            tilt_heavy = (self.cfg.tilt_enabled and tbias != "NEUTRAL"
+                                          and heavy == ("YES" if tbias == "UP" else "NO"))
+                            if a and a.kind == "COMPLETE" and not tilt_heavy:
                                 # tighter cap: complete only enough to BALANCE the pair
                                 # (light never exceeds heavy), accounting for completes
                                 # the lagging inventory hasn't absorbed yet -> zero excess
@@ -565,7 +576,6 @@ class MergeRunner:
                     elif heavy and abs(naked) < self.cfg.naked_cap:
                         naked_since[heavy] = None
 
-                tbias = self._trend_bias(strike, m.time_remaining())
                 # track shadow entry for the circuit-breaker (even when tilt is paused)
                 if tbias != "NEUTRAL":
                     last_bias = tbias
