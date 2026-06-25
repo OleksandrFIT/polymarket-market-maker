@@ -558,8 +558,10 @@ class MergeRunner:
                             # CONTINUOUS: even with sell_fallback, only sell near-end (never dump
                             # the cheap leg mid-window — pair it later instead).
                             near_end_sell = near_end if self.cfg.complete_continuous else True
-                            may_sell = self.cfg.sell_fallback and near_end_sell
-                            if a and ((a.kind == "SELL" and may_sell)
+                            # never SELL a deliberate favorite tilt either (defends the
+                            # net-long edge even if sell_fallback is ever enabled).
+                            may_sell = self.cfg.sell_fallback and near_end_sell and not tilt_heavy
+                            if a and not tilt_heavy and ((a.kind == "SELL" and may_sell)
                                       or (not completed and not complete_capped
                                           and near_end and self.cfg.sell_fallback)):
                                 bid = yes_bid if heavy == "YES" else no_bid
