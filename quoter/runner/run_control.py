@@ -9,12 +9,15 @@ Starts STOPPED — nothing trades until you press START on the dashboard
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 from aiohttp import web
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+
+DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 
 from quoter.config import Config
 from quoter.creds import PolyCreds
@@ -47,6 +50,7 @@ CFG = Config(
     tilt_enabled=True, tilt_cutoff_sec=45.0, tilt_fee=0.02, tilt_max_price=0.90,
     tilt_frac=0.65,
     regime_window=30, regime_min_samples=12, regime_min_ev=0.0,
+    dry_run=DRY_RUN,
 )
 # Use continuous re-quoting (active two-sided market making) when trading.
 REQUOTE = True

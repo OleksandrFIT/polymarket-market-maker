@@ -11,3 +11,4 @@ def test_tilt_fields_have_defaults():
     assert c.regime_window == 20
     assert c.regime_min_samples == 12
     assert c.regime_min_ev == 0.01
+    assert c.dry_run is False

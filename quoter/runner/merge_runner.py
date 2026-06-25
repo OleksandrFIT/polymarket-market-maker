@@ -147,7 +147,26 @@ class MergeRunner:
                 ids.add(oid)
         return ids
 
+    async def _place_limit(self, **kw):
+        """Place a limit order, or in dry_run just log the INTENDED order and return
+        a stub (no real order). All order placement MUST go through here."""
+        if self.cfg.dry_run:
+            log.info("dryrun_place", token_id=kw.get("token_id"), price=kw.get("price"),
+                     size=kw.get("size"), side=kw.get("side"),
+                     order_type=kw.get("order_type", "GTC"), post_only=kw.get("post_only"))
+            return {"order_id": "dryrun", "status": "dry"}
+        return await self.clob.place_limit(**kw)
+
+    async def _cancel_orders(self, oids):
+        """Cancel orders, or no-op in dry_run (we never placed any)."""
+        if self.cfg.dry_run:
+            return None
+        return await self.clob.cancel_orders(oids)
+
     async def cancel_all(self) -> int:
+        if self.cfg.dry_run:
+            log.info("dryrun_cancel_all")
+            return 0
         try:
             n = await self.clob.cancel_all()
             log.info("runner_cancel_all", n=n)
@@ -198,7 +217,7 @@ class MergeRunner:
         oids: list[str] = []
         for q in quotes:
             tok = m.yes_token if q.side == "YES" else m.no_token
-            r = await self.clob.place_limit(token_id=tok, price=q.price, size=q.size,
+            r = await self._place_limit(token_id=tok, price=q.price, size=q.size,
                                             side="BUY", post_only=True)
             if r and r.get("order_id"):
                 oids.append(r["order_id"])
@@ -222,7 +241,7 @@ class MergeRunner:
 
         # Cancel any unfilled resting legs (graceful end or force break).
         if oids:
-            await self.clob.cancel_orders(oids)
+            await self._cancel_orders(oids)
         yq, nq = self._shares(m.yes_token), self._shares(m.no_token)
         self.state.last_event = f"window done: matched={min(yq, nq)} naked={abs(yq - nq)}"
         log.info("runner_window_done", slug=m.slug, matched=min(yq, nq), naked=abs(yq - nq))
@@ -335,7 +354,7 @@ class MergeRunner:
 
                 # batch cancels (fewer requests)
                 if plan.cancels:
-                    await self.clob.cancel_orders(plan.cancels)
+                    await self._cancel_orders(plan.cancels)
                     for s in ("YES", "NO"):
                         if resting[s] is not None and resting[s].order_id in plan.cancels:
                             resting[s] = None
@@ -345,7 +364,7 @@ class MergeRunner:
                 if plan.posts and committed + post_cost <= self.cfg.per_market_cap_usd + 1e-9:
                     for q in plan.posts:
                         tok = m.yes_token if q.side == "YES" else m.no_token
-                        r = await self.clob.place_limit(token_id=tok, price=q.price, size=q.size,
+                        r = await self._place_limit(token_id=tok, price=q.price, size=q.size,
                                                         side="BUY", post_only=True)
                         if r and r.get("order_id"):
                             resting[q.side] = RestingOrder(r["order_id"], q.side, q.price, q.size)
@@ -537,7 +556,7 @@ class MergeRunner:
                                     budget_left = self.cfg.per_window_cap - realized
                                     cq = float(int(min(cq, max(0.0, budget_left / px))))
                                 if px and cq > 0:
-                                    r = await self.clob.place_limit(
+                                    r = await self._place_limit(
                                         token_id=tok, price=px, size=cq,
                                         side="BUY", post_only=False, order_type="FOK")
                                     if r and r.get("order_id"):
@@ -574,7 +593,7 @@ class MergeRunner:
                                 tok = m.yes_token if heavy == "YES" else m.no_token
                                 qty = abs(naked)
                                 if bid:
-                                    r = await self.clob.place_limit(
+                                    r = await self._place_limit(
                                         token_id=tok, price=bid, size=qty,
                                         side="SELL", post_only=False, order_type="FOK")
                                     if r and r.get("order_id"):
@@ -607,7 +626,7 @@ class MergeRunner:
                                    self.cfg.complete_step, self.cfg.tilt_max_price)
                     if cq > 0 and fav_ask:
                         tok = m.yes_token if fav_side == "YES" else m.no_token
-                        r = await self.clob.place_limit(
+                        r = await self._place_limit(
                             token_id=tok, price=fav_ask, size=cq,
                             side="BUY", post_only=False, order_type="FAK")
                         if r and r.get("order_id"):
@@ -631,7 +650,7 @@ class MergeRunner:
                     trend_bias="NEUTRAL", suppressed=frozenset(flattened))
 
                 if plan.cancels:
-                    await self.clob.cancel_orders(plan.cancels)
+                    await self._cancel_orders(plan.cancels)
                     for side in ("YES", "NO"):
                         resting[side] = [ro for ro in resting[side] if ro.order_id not in plan.cancels]
 
@@ -648,7 +667,7 @@ class MergeRunner:
                     if committed + post_cost > self.cfg.per_window_cap + 1e-9:
                         continue
                     tok = m.yes_token if q.side == "YES" else m.no_token
-                    r = await self.clob.place_limit(token_id=tok, price=q.price, size=q.size,
+                    r = await self._place_limit(token_id=tok, price=q.price, size=q.size,
                                                     side="BUY", post_only=True)
                     if r and r.get("order_id"):
                         resting[q.side].append(RestingOrder(r["order_id"], q.side, q.price, q.size))

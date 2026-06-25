@@ -95,6 +95,7 @@ class Config:
     tilt_fee: float = 0.02           # taker cost estimate (fee + sizing buffer)
     tilt_max_price: float = 0.90     # don't chase the favorite above this ask
     tilt_frac: float = 0.65          # target favorite $ = tilt_frac * per_window_cap
+    dry_run: bool = False            # log intended orders, place NONE (paper on live data)
     regime_window: int = 20          # rolling window of directional calls
     regime_min_samples: int = 12     # shadow-only warm-up until this many windows
     regime_min_ev: float = 0.01      # min paper tilt-EV/share to keep tilt enabled
