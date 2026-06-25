@@ -26,9 +26,9 @@ from quoter.runner.control_dashboard import make_control_app
 CFG = Config(
     assets=("BTC",), timeframes=("15m",),
     # ── base maker ladder (near-mid, two-sided): pairs <$1 + moderate insurance leg ──
-    merge_edge=0.02, flat_size=5, rung_size=5, rungs=2, rung_spacing=0.03,
+    merge_edge=0.02, flat_size=5, rung_size=5, rungs=1, rung_spacing=0.03,
     ladder_anchor="entry", max_inflight_rungs=1,
-    naked_cap=5,                    # bounds BASE imbalance (tilt may exceed this by design)
+    naked_cap=3,                    # bounds BASE imbalance (tilt may exceed this by design)
     min_buy_price=0.20,             # insurance allowed cheaper than 0.42, but not the
                                     # -EV deep tail ($0.05-0.10); calibrate vs -$61 hedge
     deep_ladder=False,              # OFF - the -EV deep-catch is gone
@@ -45,6 +45,7 @@ CFG = Config(
     #    + window=30 loosen the CB so it pauses only on a genuinely -EV rolling stretch
     #    (at 0.01/20 it over-paused 29% of signals with no EV gain on pure-trend data). ──
     tilt_enabled=True, tilt_cutoff_sec=45.0, tilt_fee=0.02, tilt_max_price=0.90,
+    tilt_frac=0.65,
     regime_window=30, regime_min_samples=12, regime_min_ev=0.0,
 )
 # Use continuous re-quoting (active two-sided market making) when trading.

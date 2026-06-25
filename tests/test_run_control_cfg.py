@@ -22,4 +22,7 @@ def test_live_cfg_is_momentum_tilt_step1():
     assert c.regime_min_ev == 0.0
     assert c.regime_window == 30
     assert c.tilt_max_price == 0.90
+    assert c.tilt_frac == 0.65
+    assert c.rungs == 1
+    assert c.naked_cap == 3
     assert c.trend_confidence == 0.35

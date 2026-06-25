@@ -601,10 +601,10 @@ class MergeRunner:
                         and m.time_remaining() > self.cfg.tilt_cutoff_sec):
                     fav_side = "YES" if tbias == "UP" else "NO"
                     fav_ask = yes_ask if fav_side == "YES" else no_ask
-                    inv_fav = inv_yes if fav_side == "YES" else inv_no
-                    cq = plan_tilt(tbias, fav_ask, inv_fav, realized,
-                                   self.cfg.per_window_cap, self.cfg.complete_step,
-                                   self.cfg.tilt_max_price)
+                    fav_cost = inv.cost["YES"] if fav_side == "YES" else inv.cost["NO"]
+                    cq = plan_tilt(tbias, fav_ask, fav_cost, realized,
+                                   self.cfg.per_window_cap, self.cfg.tilt_frac,
+                                   self.cfg.complete_step, self.cfg.tilt_max_price)
                     if cq > 0 and fav_ask:
                         tok = m.yes_token if fav_side == "YES" else m.no_token
                         r = await self.clob.place_limit(
