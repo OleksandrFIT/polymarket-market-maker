@@ -2,22 +2,23 @@
 
   .venv/bin/python -m quoter.runner.run_control
 
-Starts STOPPED — nothing trades until you press START on the dashboard
+LIVE TRADING IS DISABLED. This entry point is hardwired to dry_run=True — the bot
+reads the live market and logs intended orders ("dryrun_place") but places NONE.
+To ever re-enable real trading, dry_run below must be deliberately changed (and the
+order-mutation wrappers in merge_runner are the only path that can hit the exchange).
+Starts STOPPED — nothing happens until you press START on the dashboard
 (http://127.0.0.1:8080, via SSH tunnel). BTC-only, hard caps.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 from aiohttp import web
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
-
-DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 
 from quoter.config import Config
 from quoter.creds import PolyCreds
@@ -50,8 +51,10 @@ CFG = Config(
     tilt_enabled=True, tilt_cutoff_sec=45.0, tilt_fee=0.02, tilt_max_price=0.90,
     tilt_frac=0.65,
     regime_window=30, regime_min_samples=12, regime_min_ev=0.0,
-    dry_run=DRY_RUN,
+    dry_run=True,                    # LIVE DISABLED — paper/dry-run only, places no real orders
 )
+# Hard safety: refuse to run if live trading was re-enabled by mistake.
+assert CFG.dry_run is True, "LIVE TRADING DISABLED: CFG.dry_run must stay True"
 # Use continuous re-quoting (active two-sided market making) when trading.
 REQUOTE = True
 

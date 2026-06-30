@@ -26,3 +26,5 @@ def test_live_cfg_is_momentum_tilt_step1():
     assert c.rungs == 1
     assert c.naked_cap == 3
     assert c.trend_confidence == 0.35
+    # LIVE TRADING DISABLED — entry point is hardwired to dry-run only
+    assert c.dry_run is True
