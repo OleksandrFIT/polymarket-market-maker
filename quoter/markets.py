@@ -30,6 +30,14 @@ _TOKEN_RE_ALT = re.compile(r'"clobTokenIds":\s*"\[\\"(\d+)\\",\\"(\d+)\\"\]"')
 _NEGRISK_RE = re.compile(r'"negativeRisk"\s*:\s*(true|false)')
 _CONDITION_RE = re.compile(r'"conditionId"\s*:\s*"(0x[a-fA-F0-9]+)"')
 
+# 2026-07: Polymarket now serves the market JSON *escaped* in the HTML —
+# ``clobTokenIds\":[\"..\",\"..\"]`` / ``conditionId\":\"0x..\"`` (\" is a literal
+# backslash-quote pair). Without these the parser matches nothing and
+# discover_markets returns found=0 for every window.
+_TOKEN_RE_ESC = re.compile(r'clobTokenIds\\":\[\\"(\d+)\\",\\"(\d+)\\"\]')
+_CONDITION_RE_ESC = re.compile(r'conditionId\\":\\"(0x[a-fA-F0-9]+)\\"')
+_NEGRISK_RE_ESC = re.compile(r'negRisk\\":\s*(true|false)')
+
 
 @dataclass(frozen=True)
 class Market:
@@ -118,19 +126,20 @@ async def _fetch_one(
     if r.status_code != 200:
         return None
     html = r.text
-    # Try both serialization styles
-    m = _TOKEN_RE.search(html) or _TOKEN_RE_ALT.search(html)
+    # Try all serialization styles: unescaped, legacy-string-escaped, and the
+    # 2026-07 escaped-blob form.
+    m = _TOKEN_RE.search(html) or _TOKEN_RE_ALT.search(html) or _TOKEN_RE_ESC.search(html)
     if not m:
         return None
     yes_token, no_token = m.group(1), m.group(2)
 
-    cm = _CONDITION_RE.search(html)
+    cm = _CONDITION_RE.search(html) or _CONDITION_RE_ESC.search(html)
     if not cm:
         log.warning("no_condition_id", slug=slug)
         return None
     condition_id = cm.group(1)
 
-    nrm = _NEGRISK_RE.search(html)
+    nrm = _NEGRISK_RE.search(html) or _NEGRISK_RE_ESC.search(html)
     negative_risk = (nrm.group(1) == "true") if nrm else False
     if negative_risk:
         log.info("skipping_negative_risk", slug=slug)
