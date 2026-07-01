@@ -4,7 +4,7 @@ import sys
 import statistics
 from functools import partial
 
-from quoter.research.mm_tape import load_window, competitor_targets, ticks_from_tape
+from quoter.research.mm_tape import load_window, subgraph_targets, ticks_from_tape
 from quoter.research.mm_policy import guru_like_quotes, our_quotes
 from quoter.research.mm_sim import simulate_window
 from quoter.research.mm_calibrate import calibrate
@@ -15,8 +15,9 @@ STEP = 20                         # quote-refresh cadence (sec)
 LOSS_GATE = 0.5                   # per-window loss above this => projection unreliable
 WINDOWS_PER_DAY = 288            # 5m windows in a day
 
-# ── 1. calibration set: competitor open both-sided windows ──
-tgts = competitor_targets(ADDR)
+# ── 1. calibration set: competitor real maker fills over RESOLVED 5m windows ──
+tgts = subgraph_targets(ADDR)
+print("subgraph windows found: %d" % len(tgts))
 cal = []
 targets = []
 for t in tgts:
@@ -27,9 +28,9 @@ for t in tgts:
     ticks = ticks_from_tape(tape, open_ts, STEP)
     cal.append((tape, winner, ticks))
     targets.append(t)
-print("calibration windows: %d" % len(cal))
+print("windows with loadable resolved tapes: %d" % len(cal))
 if not cal:
-    print("no calibration windows (competitor inactive or tapes unavailable)"); sys.exit()
+    print("no calibration windows (no resolved tapes for subgraph fills)"); sys.exit()
 
 # ── 2. calibrate guru_like policy ──
 guru_pol = lambda mid, inv: guru_like_quotes(mid, size=9, levels=8)
