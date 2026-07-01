@@ -1,0 +1,15 @@
+[Unit]
+Description=poly-quoter order-book snapshot collector (READ-ONLY, no trading)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/poly-quoter
+ExecStart=/home/ubuntu/poly-quoter/.venv/bin/python -m quoter.research.book_collector
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
