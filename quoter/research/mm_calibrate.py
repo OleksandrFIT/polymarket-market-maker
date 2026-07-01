@@ -8,6 +8,19 @@ from quoter.research.mm_sim import simulate_window
 _EPS = 1e-6
 
 
+def realized_pnl(target, winner):
+    """Competitor's actual realized PnL for one window from his real per-side fills.
+    target: {size_up,avg_up,size_dn,avg_dn}; winner: 'Up'|'Down'.
+    spent = size_up*avg_up + size_dn*avg_dn; returned = size of winning side; pnl = returned-spent."""
+    su = float(target["size_up"])
+    au = float(target["avg_up"])
+    sd = float(target["size_dn"])
+    ad = float(target["avg_dn"])
+    spent = su * au + sd * ad
+    returned = su if winner == "Up" else sd
+    return returned - spent
+
+
 def window_loss(result, target: dict) -> float:
     loss = 0.0
     # size terms: relative squared error

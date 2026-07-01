@@ -1,4 +1,4 @@
-from quoter.research.mm_calibrate import window_loss, calibrate
+from quoter.research.mm_calibrate import window_loss, calibrate, realized_pnl
 from quoter.research.mm_sim import simulate_window
 from quoter.research.mm_policy import guru_like_quotes
 from quoter.research.mm_types import Theta, WindowResult
@@ -24,6 +24,14 @@ def _synthetic_tape():
     # crossing Up + Down sells so a guru_like bid fills on both sides
     return [{"ts": 10, "side": "SELL", "oi": 0, "price": 0.48, "size": 100},
             {"ts": 11, "side": "SELL", "oi": 1, "price": 0.48, "size": 100}]
+
+
+def test_realized_pnl_favorite_wins():
+    # Up 955@0.136 + Dn 1804@0.721; spent=129.88+1300.68=1430.56; Down wins -> returned 1804
+    t = {"size_up": 955, "avg_up": 0.136, "size_dn": 1804, "avg_dn": 0.721}
+    spent = 955 * 0.136 + 1804 * 0.721
+    assert abs(realized_pnl(t, "Down") - (1804 - spent)) < 1e-6
+    assert abs(realized_pnl(t, "Up") - (955 - spent)) < 1e-6
 
 
 def test_calibrate_recovers_known_theta():
