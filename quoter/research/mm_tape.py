@@ -152,6 +152,89 @@ def _fetch_trades(cond):
     return out
 
 
+GOLDSKY = ("https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/"
+           "subgraphs/orderbook-subgraph/prod/gn")
+
+
+def _gql(query, tries=4):
+    """POST a GraphQL query to the Goldsky orderbook-subgraph; return the
+    data.orderFilledEvents list, or [] on failure."""
+    body = json.dumps({"query": query}).encode()
+    hdr = dict(UA)
+    hdr["Content-Type"] = "application/json"
+    for k in range(tries):
+        try:
+            resp = json.load(urllib.request.urlopen(
+                urllib.request.Request(GOLDSKY, data=body, headers=hdr), timeout=30))
+            return (resp.get("data") or {}).get("orderFilledEvents") or []
+        except Exception:
+            if k == tries - 1:
+                return []
+            time.sleep(0.6)
+
+
+def resolve_token(tid):
+    """gamma clob_token_ids lookup for a token id -> (slug, side) or None.
+    side = 'Up' if tid == clobTokenIds[0] else 'Down'. Cached."""
+    g = _cached("tok_" + tid, lambda: _get(
+        "https://gamma-api.polymarket.com/markets?closed=true&clob_token_ids=%s" % tid))
+    if not (isinstance(g, list) and g):
+        return None
+    m = g[0]
+    slug = m.get("slug")
+    ids = m.get("clobTokenIds")
+    if isinstance(ids, str):
+        try:
+            ids = json.loads(ids)
+        except (ValueError, TypeError):
+            return None
+    if not slug or not isinstance(ids, list) or not ids:
+        return None
+    side = "Up" if str(tid) == str(ids[0]) else "Down"
+    return slug, side
+
+
+def subgraph_targets(addr, max_pages=6):
+    """Paginate maker orderFilledEvents for addr (timestamp_lt cursor), decode BUY
+    fills, resolve token -> slug+side, keep only '-5m-' slugs, aggregate per window.
+    Return the list of per-window target dicts."""
+    decoded = []
+    cursor = int(time.time()) + 1
+    seen = set()
+    for _ in range(max_pages):
+        q = ('{ orderFilledEvents(first:1000, where:{maker:"%s", timestamp_lt:%d}, '
+             'orderBy:timestamp, orderDirection:desc){ makerAssetId takerAssetId '
+             'makerAmountFilled takerAmountFilled timestamp } }' % (addr, cursor))
+        evs = _gql(q)
+        if not evs:
+            break
+        for ev in evs:
+            try:
+                ts = int(ev["timestamp"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if ts < cursor:
+                cursor = ts
+            d = decode_maker_buy(ev)
+            if d is None:
+                continue
+            rt = resolve_token(d["tid"])
+            if rt is None:
+                continue
+            slug, side = rt
+            if "-5m-" not in slug:
+                continue
+            decoded.append({"slug": slug, "side": side,
+                            "price": d["price"], "size": d["size"]})
+        if len(evs) < 1000:
+            break
+        # guard against a stuck cursor
+        if cursor in seen:
+            break
+        seen.add(cursor)
+    return list(aggregate_fills(decoded).values())
+
+
 def competitor_targets(addr):
     """Real per-window end-state from open both-sided positions:
     [{slug, size_up, size_dn, avg_up, avg_dn}]."""
