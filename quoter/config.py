@@ -100,6 +100,12 @@ class Config:
     regime_min_samples: int = 12     # shadow-only warm-up until this many windows
     regime_min_ev: float = 0.01      # min paper tilt-EV/share to keep tilt enabled
 
+    # ── phase-26 5m early-consistent-leader strategy (separate from tilt) ──
+    strategy: str = "tilt"           # "tilt" (15m momentum) | "five_min" (5m early leader)
+    lean: int = 3                    # leader:laggard share ratio when accumulating
+    band_lo: float = 0.62            # leader price band at minute 2 (inclusive)
+    band_hi: float = 0.78
+
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle
     requote_on_mid_move_cents: int = 1
