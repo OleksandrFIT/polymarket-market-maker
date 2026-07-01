@@ -5,10 +5,12 @@ import statistics
 from functools import partial
 
 from quoter.research.mm_tape import load_window, subgraph_targets, ticks_from_tape
-from quoter.research.mm_policy import guru_like_quotes, our_quotes
+from quoter.research.mm_policy import guru_like_quotes, our_quotes, deep_ladder_quotes
 from quoter.research.mm_sim import simulate_window
 from quoter.research.mm_calibrate import calibrate
 from quoter.research.mm_types import Theta
+
+_EPS = 1e-6
 
 ADDR = sys.argv[1] if len(sys.argv) > 1 else "0xb27bc932bf8110d8f78e55da7d5f0497a18b5b82"
 STEP = 20                         # quote-refresh cadence (sec)
@@ -32,12 +34,31 @@ print("windows with loadable resolved tapes: %d" % len(cal))
 if not cal:
     print("no calibration windows (no resolved tapes for subgraph fills)"); sys.exit()
 
-# ── 2. calibrate guru_like policy ──
-guru_pol = lambda mid, inv: guru_like_quotes(mid, size=9, levels=8)
-grid = [Theta(fill=f, lag=lag) for f in (0.05, 0.1, 0.2, 0.3, 0.5, 0.8) for lag in (0.0, 2.0)]
+# ── 2. calibrate deep-ladder policy at competitor SCALE and DEPTH ──
+# The competitor rests bids DEEP below mid across the whole curve at large size,
+# catching the cheap tail on panic dumps. Match that depth/scale so the policy can
+# represent his real (below-VWAP) average fill price.
+guru_pol = lambda mid, inv: deep_ladder_quotes(mid, size=200, levels=25, step=0.02)
+grid = [Theta(fill=f, lag=lag)
+        for f in (0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0)
+        for lag in (0.0, 2.0, 5.0)]
 theta, loss, per = calibrate(cal, targets, guru_pol, grid)
 per_window = loss / len(cal)
 print("best theta: fill=%.2f lag=%.1f  loss/window=%.3f" % (theta.fill, theta.lag, per_window))
+
+# ── 2b. per-term loss breakdown at the calibrated theta (what drives residual) ──
+size_loss = 0.0
+price_loss = 0.0
+for (tape, winner, ticks), tgt in zip(cal, targets):
+    r = simulate_window(tape, winner, guru_pol, theta, ticks)
+    for got, want in ((r.gross_up, tgt["size_up"]), (r.gross_dn, tgt["size_dn"])):
+        denom = abs(float(want)) + _EPS
+        size_loss += ((got - float(want)) / denom) ** 2
+    for got, want in ((r.avg_up, tgt["avg_up"]), (r.avg_dn, tgt["avg_dn"])):
+        price_loss += (got - float(want)) ** 2
+print("loss breakdown: size-loss=%.3f  price-loss=%.3f  (total=%.3f, /window size=%.3f price=%.3f)"
+      % (size_loss, price_loss, size_loss + price_loss,
+         size_loss / len(cal), price_loss / len(cal)))
 
 # ── 3. honesty gate ──
 if per_window > LOSS_GATE:
