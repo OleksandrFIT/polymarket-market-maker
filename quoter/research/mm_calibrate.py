@@ -10,11 +10,13 @@ _EPS = 1e-6
 
 def window_loss(result, target: dict) -> float:
     loss = 0.0
-    for got, key in ((result.gross_up, "size_up"), (result.gross_dn, "size_dn"),
-                     (result.avg_up, "avg_up"), (result.avg_dn, "avg_dn")):
-        want = float(target[key])
-        denom = abs(want) + _EPS
-        loss += ((got - want) / denom) ** 2
+    # size terms: relative squared error
+    for got, want in ((result.gross_up, target["size_up"]), (result.gross_dn, target["size_dn"])):
+        denom = abs(float(want)) + _EPS
+        loss += ((got - float(want)) / denom) ** 2
+    # price terms: absolute squared error (prices in [0,1], no relative blow-up)
+    for got, want in ((result.avg_up, target["avg_up"]), (result.avg_dn, target["avg_dn"])):
+        loss += (got - float(want)) ** 2
     return loss
 
 
