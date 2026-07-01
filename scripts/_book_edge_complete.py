@@ -4,7 +4,6 @@ fraction, edge%, win-rate. Read-only, no trading.
 Usage: python3 scripts/_book_edge_complete.py <book_jsonl> [threshold]"""
 import sys
 import json
-import statistics
 
 from quoter.research.mm_book import load_snapshots, queue_fill, best_mid, best_ask
 from quoter.research.mm_policy import deep_ladder_quotes
@@ -19,10 +18,11 @@ SIZE, LEVELS, STEP = 5, 15, 0.03
 WINDOWS_PER_DAY = 288
 
 
-def _result(inv, spent, winner):
+def _result(inv, spent, winner, taker_sh=0.0):
     matched = min(inv["Up"], inv["Down"])
     total = inv["Up"] + inv["Down"]
-    return {"pnl": inv[winner] - spent, "spent": spent, "matched": matched, "total": total}
+    return {"pnl": inv[winner] - spent, "spent": spent, "matched": matched,
+            "total": total, "taker_sh": taker_sh}
 
 
 def simulate(slug):
@@ -65,11 +65,12 @@ def simulate(slug):
     naked = abs(ni["Up"] - ni["Down"])
     havg = nc[heavy] / ni[heavy] if ni[heavy] > 0 else 0.0
     lask = ask_at(snaps[-1], light)
+    near_taker = 0.0
     if lask is not None:
         buy = completion_buy(heavy, havg, lask, naked, THRESHOLD)
         if buy:
-            ni[buy[0]] += buy[1]; nc[buy[0]] += buy[1] * buy[2]
-    near = _result(ni, nc["Up"] + nc["Down"], winner)
+            ni[buy[0]] += buy[1]; nc[buy[0]] += buy[1] * buy[2]; near_taker = buy[1]
+    near = _result(ni, nc["Up"] + nc["Down"], winner, near_taker)
 
     # --- continuous: complete as naked accrues, snapshot by snapshot ---
     completed = {"Up": 0.0, "Down": 0.0}; taker_cost = 0.0
@@ -87,7 +88,8 @@ def simulate(slug):
                 completed[buy[0]] += buy[1]; taker_cost += buy[1] * buy[2]
     mi, mc = maker_fills(close_ts + 1)
     ci = {k: mi[k] + completed[k] for k in ("Up", "Down")}
-    cont = _result(ci, mc["Up"] + mc["Down"] + taker_cost, winner)
+    cont = _result(ci, mc["Up"] + mc["Down"] + taker_cost, winner,
+                   completed["Up"] + completed["Down"])
 
     return {"base": base, "near": near, "cont": cont}
 
@@ -99,9 +101,10 @@ def agg(rows, key):
     matched = sum(r["matched"] for r in rs)
     total = sum(r["total"] for r in rs)
     wins = sum(1 for r in rs if r["pnl"] > 0)
+    taker = sum(r["taker_sh"] for r in rs)
     edge = 100 * pnl / spent if spent else 0.0
     mfrac = 100 * 2 * matched / total if total else 0.0
-    return edge, mfrac, 100 * wins / len(rs) if rs else 0.0, spent, pnl
+    return edge, mfrac, 100 * wins / len(rs) if rs else 0.0, spent, pnl, taker
 
 
 slugs = set()
@@ -116,12 +119,13 @@ print("windows with book data:", len(slugs), " threshold:", THRESHOLD)
 rows = [r for r in (simulate(s) for s in sorted(slugs)) if r]
 print("windows simulated:", len(rows))
 if rows:
-    print("\n%-10s %10s %12s %10s" % ("mode", "edge%", "matched%", "win%"))
+    print("\n%-10s %10s %12s %8s %12s" % ("mode", "edge%", "matched%", "win%", "taker-sh"))
     for key, name in (("base", "baseline"), ("near", "near-end"), ("cont", "continuous")):
-        edge, mfrac, winr, spent, pnl = agg(rows, key)
+        edge, mfrac, winr, spent, pnl, taker = agg(rows, key)
         dpw = spent / len(rows)
-        print("%-10s %+9.2f%% %11.0f%% %9.0f%%   spent $%.0f pnl $%+.0f  $/day@$%.0f=%+.0f" %
-              (name, edge, mfrac, winr, spent, pnl, dpw, dpw * (edge / 100) * WINDOWS_PER_DAY))
+        print("%-10s %+9.2f%% %11.0f%% %7.0f%% %11.0f   spent $%.0f pnl $%+.0f  $/day@$%.0f=%+.0f" %
+              (name, edge, mfrac, winr, taker, spent, pnl, dpw, dpw * (edge / 100) * WINDOWS_PER_DAY))
+    print("(taker-sh = shares bought as taker to complete; high continuous taker-sh = flip churn)")
 
 # competitor ground-truth context
 tg = subgraph_targets(ADDR, max_pages=20)
