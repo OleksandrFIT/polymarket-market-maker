@@ -16,8 +16,12 @@ def simulate_window(tape: list, winner: str, policy_fn, theta: Theta,
     last_ts = (tape[-1]["ts"] + 1) if tape else 0
 
     for i, (ts, mid) in enumerate(ticks):
-        end = ticks[i + 1][0] if i + 1 < len(ticks) else last_ts
-        sl = [t for t in tape if ts <= t["ts"] < end + theta.lag]
+        # Non-overlapping lag partition: the old quote lingers `lag` into the next
+        # window and the new quote activates only after `lag`. Tick i covers
+        # [start, end) where start == prev tick's end, so slices never overlap.
+        start = ts if i == 0 else ts + theta.lag
+        end = (ticks[i + 1][0] + theta.lag) if i + 1 < len(ticks) else last_ts
+        sl = [t for t in tape if start <= t["ts"] < end]
         for q in policy_fn(mid, live):
             fr = fill(q.side, q.price, q.size, sl, theta)
             if fr.filled > 0:
