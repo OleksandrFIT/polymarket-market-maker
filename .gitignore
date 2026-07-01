@@ -18,5 +18,6 @@ build/
 settings.json
 state.db*.bak
 quoter/backtest/data/
+data/
 _analyze_flips.py
 node-live-test/

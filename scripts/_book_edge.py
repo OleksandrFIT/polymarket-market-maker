@@ -3,12 +3,11 @@
 edge% vs the competitor's ground-truth edge%. Read-only.
 Usage: python3 scripts/_book_edge.py <book_jsonl_path> [addr]"""
 import sys
-import statistics
-import collections
+import json
 
 from quoter.research.mm_book import load_snapshots, queue_fill
 from quoter.research.mm_policy import deep_ladder_quotes
-from quoter.research.mm_tape import load_window, competitor_targets, subgraph_targets
+from quoter.research.mm_tape import load_window, subgraph_targets
 from quoter.research.mm_calibrate import realized_pnl
 
 BOOK = sys.argv[1] if len(sys.argv) > 1 else "data/book.jsonl"
@@ -34,7 +33,7 @@ for slug in sorted(slugs):
     w = load_window(slug)
     if not w or not w[0]:
         continue
-    tape, winner, open_ts = w
+    tape, winner, _open_ts = w
     snaps = load_snapshots(BOOK, slug)
     if not snaps:
         continue
@@ -53,7 +52,10 @@ for slug in sorted(slugs):
     spent = cost["Up"] + cost["Down"]
     if spent <= 0:
         continue
-    m = min(inv["Up"], inv["Down"]); returned = m + (inv[winner] - m)
+    # Held to resolution: a merged pair ($1) and holding both legs (winner $1 + loser $0)
+    # give the SAME $1 per matched pair, so merging doesn't change resolution PnL —
+    # payout is simply the winning-side inventory; the loser expires worthless.
+    returned = inv[winner]
     pnl = returned - spent
     rows.append((slug, pnl, spent))
 
@@ -73,7 +75,6 @@ for t in tg:
     if w:
         comp.append(realized_pnl(t, w[1]))
 if comp:
-    cs = sum(realized_pnl(t, load_window(t["slug"])[1]) for t in tg if load_window(t["slug"]))
     print("competitor ground-truth pnl over %d windows: $%+.2f" % (len(comp), sum(comp)))
 
 print("\nCAVEATS: fill needs BOTH sides (naked risk if one-sided); snapshot=tick is a proxy;")
