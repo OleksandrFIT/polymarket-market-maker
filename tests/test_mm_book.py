@@ -1,4 +1,17 @@
-from quoter.research.mm_book import depth_ahead, queue_fill
+from quoter.research.mm_book import depth_ahead, queue_fill, best_mid
+
+
+def test_best_mid_uses_top_of_book_not_list_order():
+    # CLOB returns bids ascending, asks descending -> [0] is NOT top of book
+    bids = [[0.01, 100], [0.10, 20], [0.15, 5]]   # best bid = 0.15
+    asks = [[0.99, 100], [0.30, 10], [0.23, 8]]   # best ask = 0.23
+    assert best_mid(bids, asks) == (0.15 + 0.23) / 2
+
+
+def test_best_mid_falls_back_to_one_side_or_half():
+    assert best_mid([[0.4, 10]], []) == 0.4
+    assert best_mid([], [[0.6, 10]]) == 0.6
+    assert best_mid([], []) == 0.5
 
 
 def test_depth_ahead_sums_levels_at_or_above_price():

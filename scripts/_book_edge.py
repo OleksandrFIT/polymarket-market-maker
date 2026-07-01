@@ -5,7 +5,7 @@ Usage: python3 scripts/_book_edge.py <book_jsonl_path> [addr]"""
 import sys
 import json
 
-from quoter.research.mm_book import load_snapshots, queue_fill
+from quoter.research.mm_book import load_snapshots, queue_fill, best_mid
 from quoter.research.mm_policy import deep_ladder_quotes
 from quoter.research.mm_tape import load_window, subgraph_targets
 from quoter.research.mm_calibrate import realized_pnl
@@ -40,7 +40,7 @@ for slug in sorted(slugs):
     inv = {"Up": 0.0, "Down": 0.0}; cost = {"Up": 0.0, "Down": 0.0}
     for snap in snaps:                       # each snapshot = one quote-refresh tick
         ts = snap["ts"]; ybids = snap["yes"]["bids"]; nbids = snap["no"]["bids"]
-        ymid = ybids[0][0] if ybids else 0.5   # best bid as mid proxy
+        ymid = best_mid(ybids, snap["yes"]["asks"])   # true top-of-book mid (CLOB order-safe)
         for q in deep_ladder_quotes(ymid, OUR_SIZE, LEVELS, STEP):
             bids = ybids if q.side == "Up" else nbids
             oi = 0 if q.side == "Up" else 1

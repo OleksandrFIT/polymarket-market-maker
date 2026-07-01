@@ -9,6 +9,21 @@ def depth_ahead(bid_levels: list, price: float) -> float:
     return sum(float(sz) for p, sz in bid_levels if float(p) >= price)
 
 
+def best_mid(bid_levels: list, ask_levels: list) -> float:
+    """Mid from best bid (MAX bid price) and best ask (MIN ask price). CLOB /book returns
+    bids ascending and asks descending, so bids[0]/asks[0] are NOT the top of book — always
+    reduce by max/min. Falls back to the one available side, or 0.5 if the book is empty."""
+    bb = max((float(p) for p, _ in bid_levels), default=None)
+    ba = min((float(p) for p, _ in ask_levels), default=None)
+    if bb is not None and ba is not None:
+        return (bb + ba) / 2
+    if bb is not None:
+        return bb
+    if ba is not None:
+        return ba
+    return 0.5
+
+
 def queue_fill(price: float, size: float, placed_ts: float,
                bid_levels: list, tape: list) -> float:
     ahead = depth_ahead(bid_levels, price)
