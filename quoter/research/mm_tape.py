@@ -48,6 +48,55 @@ def ticks_from_tape(tape: list, open_ts: int, step_sec: int) -> list:
     return ticks
 
 
+# ── pure subgraph-fill aggregation (unit-tested) ───────────────────────────
+def decode_maker_buy(ev):
+    """Return {"tid": str, "price": float, "size": float} for a BUY maker fill, or None
+    for a SELL (makerAssetId != '0') or malformed event.
+
+    A BUY fill has makerAssetId == "0" (USDC out): the bought token is takerAssetId,
+    shares = takerAmountFilled/1e6, price = makerAmountFilled/takerAmountFilled."""
+    try:
+        if str(ev["makerAssetId"]) != "0":
+            return None
+        tid = str(ev["takerAssetId"])
+        maker_amt = float(ev["makerAmountFilled"])
+        taker_amt = float(ev["takerAmountFilled"])
+        if taker_amt <= 0:
+            return None
+        return {"tid": tid, "price": maker_amt / taker_amt, "size": taker_amt / 1e6}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def aggregate_fills(decoded):
+    """decoded: list of {"slug","side","price","size"}. Return {slug: {"slug","size_up",
+    "avg_up","size_dn","avg_dn"}} with cost-weighted avg prices per side."""
+    acc = {}
+    for d in decoded:
+        slug = d["slug"]
+        side = d["side"]
+        price = float(d["price"])
+        size = float(d["size"])
+        a = acc.setdefault(slug, {"size_up": 0.0, "cost_up": 0.0,
+                                  "size_dn": 0.0, "cost_dn": 0.0})
+        if side == "Up":
+            a["size_up"] += size
+            a["cost_up"] += price * size
+        else:
+            a["size_dn"] += size
+            a["cost_dn"] += price * size
+    out = {}
+    for slug, a in acc.items():
+        out[slug] = {
+            "slug": slug,
+            "size_up": a["size_up"],
+            "avg_up": a["cost_up"] / a["size_up"] if a["size_up"] else 0.0,
+            "size_dn": a["size_dn"],
+            "avg_dn": a["cost_dn"] / a["size_dn"] if a["size_dn"] else 0.0,
+        }
+    return out
+
+
 # ── thin I/O (not unit-tested) ─────────────────────────────────────────────
 def _get(url, tries=4):
     for k in range(tries):
