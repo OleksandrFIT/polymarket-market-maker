@@ -16,6 +16,15 @@ def _load_rc(strategy: str):
     return mod
 
 
+def test_five_min_cfg_is_dry_run():
+    # the DEFAULT strategy is five_min — assert its live-lock explicitly
+    rc = _load_rc("five_min")
+    c = rc.CFG
+    assert c.dry_run is True          # LIVE DISABLED
+    assert c.strategy == "five_min"
+    assert c.timeframes == ("5m",)
+
+
 def test_live_cfg_is_momentum_tilt_step1():
     rc = _load_rc("tilt")
     c = rc.CFG
