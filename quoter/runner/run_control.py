@@ -13,12 +13,14 @@ Starts STOPPED — nothing happens until you press START on the dashboard
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 from aiohttp import web
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+STRATEGY = os.environ.get("STRATEGY", "five_min").lower()
 
 from quoter.config import Config
 from quoter.creds import PolyCreds
@@ -27,33 +29,26 @@ from quoter.runner.trading_state import TradingState
 from quoter.runner.merge_runner import MergeRunner
 from quoter.runner.control_dashboard import make_control_app
 
-CFG = Config(
-    assets=("BTC",), timeframes=("15m",),
-    # ── base maker ladder (near-mid, two-sided): pairs <$1 + moderate insurance leg ──
-    merge_edge=0.02, flat_size=5, rung_size=5, rungs=1, rung_spacing=0.03,
-    ladder_anchor="entry", max_inflight_rungs=1,
-    naked_cap=3,                    # bounds BASE imbalance (tilt may exceed this by design)
-    min_buy_price=0.20,             # insurance allowed cheaper than 0.42, but not the
-                                    # -EV deep tail ($0.05-0.10); calibrate vs -$61 hedge
-    deep_ladder=False,              # OFF - the -EV deep-catch is gone
-    # ── risk: ~$15/window ──
-    per_window_cap=15.0, per_market_cap_usd=15.0, min_time_to_expiry_sec=5.0,
-    # ── pair completion (continuous; never sell - guru-style). Completion is now
-    #    tilt-aware in merge_runner: it won't pair off a deliberate favorite tilt. ──
-    complete_pairs=True, complete_continuous=True, complete_step=10,
-    complete_gate_sec=120.0, auto_flat=False, sell_fallback=False,
-    # ── trend detector ON (drives the tilt only; base ladder is NEUTRAL) ──
-    trend_enabled=True, trend_confidence=0.35, trend_gate_sec=600.0,
-    # ── directional tilt + circuit-breaker. Calibrated via scripts/_replay_tilt.py:
-    #    avg favorite entry 0.815, breakeven 0.835, gated paper-EV +0.048. regime_min_ev=0.0
-    #    + window=30 loosen the CB so it pauses only on a genuinely -EV rolling stretch
-    #    (at 0.01/20 it over-paused 29% of signals with no EV gain on pure-trend data). ──
-    tilt_enabled=True, tilt_cutoff_sec=45.0, tilt_fee=0.02, tilt_max_price=0.90,
-    tilt_frac=0.65,
-    regime_window=30, regime_min_samples=12, regime_min_ev=0.0,
-    dry_run=True,                    # LIVE DISABLED — paper/dry-run only, places no real orders
-)
-# Hard safety: refuse to run if live trading was re-enabled by mistake.
+if STRATEGY == "five_min":
+    CFG = Config(
+        strategy="five_min", assets=("BTC",), timeframes=("5m",),
+        lean=3, band_lo=0.62, band_hi=0.78, rung_size=5,
+        per_window_cap=15.0, per_market_cap_usd=15.0, min_time_to_expiry_sec=5.0,
+        dry_run=True,                    # LIVE DISABLED
+    )
+else:
+    CFG = Config(
+        assets=("BTC",), timeframes=("15m",),
+        merge_edge=0.02, flat_size=5, rung_size=5, rungs=1, rung_spacing=0.03,
+        ladder_anchor="entry", max_inflight_rungs=1, naked_cap=3, min_buy_price=0.20,
+        deep_ladder=False, per_window_cap=15.0, per_market_cap_usd=15.0,
+        min_time_to_expiry_sec=5.0, complete_pairs=True, complete_continuous=True,
+        complete_step=10, complete_gate_sec=120.0, auto_flat=False, sell_fallback=False,
+        trend_enabled=True, trend_confidence=0.35, trend_gate_sec=600.0,
+        tilt_enabled=True, tilt_cutoff_sec=45.0, tilt_fee=0.02, tilt_max_price=0.90,
+        tilt_frac=0.65, regime_window=30, regime_min_samples=12, regime_min_ev=0.0,
+        dry_run=True,                    # LIVE DISABLED
+    )
 assert CFG.dry_run is True, "LIVE TRADING DISABLED: CFG.dry_run must stay True"
 # Use continuous re-quoting (active two-sided market making) when trading.
 REQUOTE = True

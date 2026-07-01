@@ -1,10 +1,23 @@
 """Guards the LIVE run_control.CFG values (defaults are tested separately in
 test_config_tilt.py). Catches accidental reversion to the -EV deep-ladder config
 or a mis-set risk cap / circuit-breaker tuning."""
-import quoter.runner.run_control as rc
+import importlib
+import os
+import sys
+
+
+def _load_rc(strategy: str):
+    """Reload run_control with STRATEGY env set."""
+    os.environ["STRATEGY"] = strategy
+    mod_name = "quoter.runner.run_control"
+    if mod_name in sys.modules:
+        del sys.modules[mod_name]
+    mod = importlib.import_module(mod_name)
+    return mod
 
 
 def test_live_cfg_is_momentum_tilt_step1():
+    rc = _load_rc("tilt")
     c = rc.CFG
     # the -EV deep-ladder measurement mode must be OFF
     assert c.deep_ladder is False
