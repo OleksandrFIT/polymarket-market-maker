@@ -33,3 +33,70 @@ def _side(book) -> dict:
 
 def snapshot_record(ts, slug, yes_book, no_book) -> dict:
     return {"ts": int(ts), "slug": slug, "yes": _side(yes_book), "no": _side(no_book)}
+
+
+_token_cache: dict[str, tuple[str, str]] = {}
+
+
+def _resolve_tokens(client: httpx.Client, slug: str):
+    """Return (yes_token, no_token) for a slug via gamma, cached. None on failure."""
+    if slug in _token_cache:
+        return _token_cache[slug]
+    try:
+        r = client.get("%s/markets" % GAMMA, params={"slug": slug}, headers=UA, timeout=10)
+        arr = r.json()
+        toks = json.loads(arr[0]["clobTokenIds"]) if arr else None
+        if toks and len(toks) == 2:
+            _token_cache[slug] = (toks[0], toks[1])
+            return _token_cache[slug]
+    except Exception:
+        pass
+    return None
+
+
+def _get_book(client: httpx.Client, token_id: str) -> dict:
+    r = client.get("%s/book" % CLOB, params={"token_id": token_id}, headers=UA, timeout=10)
+    return r.json()
+
+
+def _tick(client: httpx.Client) -> dict | None:
+    """One collection tick: resolve tokens, fetch both books, return the JSONL record or None."""
+    now = time.time()
+    slug = current_slug(now)
+    toks = _resolve_tokens(client, slug)
+    if not toks:
+        return None
+    yb = _get_book(client, toks[0])
+    nb = _get_book(client, toks[1])
+    return snapshot_record(now, slug, yb, nb)
+
+
+def _append(rec: dict) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    day = time.strftime("%Y%m%d", time.gmtime(rec["ts"]))
+    with open(os.path.join(DATA_DIR, "book_%s.jsonl" % day), "a") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def main() -> None:
+    once = "--once" in sys.argv
+    with httpx.Client(http2=False) as client:
+        while True:
+            try:
+                rec = _tick(client)
+                if rec is not None:
+                    _append(rec)
+                    if once:
+                        print("wrote snapshot for", rec["slug"],
+                              "yes_bids", len(rec["yes"]["bids"]),
+                              "no_bids", len(rec["no"]["bids"]))
+            except Exception as e:  # never crash the service
+                if once:
+                    print("tick error:", e)
+            if once:
+                return
+            time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()
