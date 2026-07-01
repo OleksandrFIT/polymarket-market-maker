@@ -1,4 +1,17 @@
-from quoter.research.mm_policy import guru_like_quotes, our_quotes
+from quoter.research.mm_policy import guru_like_quotes, our_quotes, deep_ladder_quotes
+
+
+def test_deep_ladder_both_sides_deep_below_mid():
+    qs = deep_ladder_quotes(mid=0.50, size=100, levels=3, step=0.10)
+    ups = [q.price for q in qs if q.side == "Up"]
+    assert ups == [0.40, 0.30, 0.20]          # deep below mid, step 0.10
+    assert all(q.size == 100 for q in qs)
+    assert len([q for q in qs if q.side == "Down"]) == 3
+
+
+def test_deep_ladder_skips_nonpositive():
+    qs = deep_ladder_quotes(mid=0.50, size=10, levels=10, step=0.10)
+    assert all(q.price > 0 for q in qs)
 
 
 def test_guru_like_quotes_both_sides_laddered():
