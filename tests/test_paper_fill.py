@@ -10,6 +10,14 @@ def test_fills_when_price_touches_bid():
     assert abs(pb.cost["YES"] - 5.0) < 1e-9
 
 
+def test_posted_tracks_all_bid_notional_even_unfilled():
+    pb = PaperBook(fill_frac=1.0)
+    pb.post("YES", 0.50, 10)              # $5 notional
+    pb.post("NO", 0.30, 10)              # $3 notional
+    assert abs(pb.posted() - 8.0) < 1e-9  # posted counts both, regardless of fills
+    assert pb.spent() == 0.0             # nothing filled yet
+
+
 def test_no_fill_when_price_above_bid():
     pb = PaperBook(fill_frac=1.0)
     pb.post("YES", 0.50, 10)

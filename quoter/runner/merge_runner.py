@@ -762,7 +762,7 @@ class MergeRunner:
                     lead2 = cur_leader
                     lead_price2 = yes_mid if cur_leader == "YES" else no_mid
 
-                plan = plan_five_min(minute, lead1, lead2, lead_price2, pb.spent(),
+                plan = plan_five_min(minute, lead1, lead2, lead_price2, pb.posted(),
                                      self.cfg.per_window_cap, self.cfg.lean,
                                      self.cfg.band_lo, self.cfg.band_hi,
                                      self.cfg.rung_size, yes_mid, no_mid)
@@ -782,7 +782,10 @@ class MergeRunner:
 
         winner = "YES" if last_yes_mid >= 0.5 else "NO"
         paper_pnl = pb.inv[winner] - pb.spent()
-        passed = (lead1 is not None and lead1 == lead2)
+        # full traded gate (matches plan_five_min): consistent leader AND in-band —
+        # so paper stats can be sliced by the REAL selection the tactic rests on.
+        passed = bool(lead1 is not None and lead1 == lead2
+                      and self.cfg.band_lo <= lead_price2 <= self.cfg.band_hi)
         log.info("fivemin_done", slug=m.slug, passed=passed, winner=winner,
                  paper_spent=round(pb.spent(), 2), paper_pnl=round(paper_pnl, 2),
                  inv_yes=round(pb.inv["YES"], 1), inv_no=round(pb.inv["NO"], 1))

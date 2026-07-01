@@ -23,12 +23,19 @@ class PaperBook:
         self._bids: list[_Bid] = []
         self.inv = {"YES": 0.0, "NO": 0.0}
         self.cost = {"YES": 0.0, "NO": 0.0}
+        self.posted_cost = 0.0        # $ notional of ALL bids posted (filled or not)
 
     def post(self, side: str, price: float, size: float) -> None:
         self._bids.append(_Bid(side, float(price), float(size)))
+        self.posted_cost += float(price) * float(size)
 
     def spent(self) -> float:
         return self.cost["YES"] + self.cost["NO"]
+
+    def posted(self) -> float:
+        """$ notional committed by resting bids — the window-cap should bind on THIS,
+        not on filled cost, else slow fills let posting stack unbounded each tick."""
+        return self.posted_cost
 
     def on_tick(self, side: str, price) -> float:
         """Fill resting bids on `side` when `price` (best offer / traded) <= bid price."""
