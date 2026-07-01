@@ -1,4 +1,12 @@
 from quoter.research.mm_book import depth_ahead, queue_fill, best_mid
+from quoter.research.mm_book import best_ask
+
+
+def test_best_ask_is_min_ask_price():
+    # CLOB returns asks descending -> [0] is NOT best ask
+    asks = [[0.99, 100], [0.30, 10], [0.23, 8]]
+    assert best_ask(asks) == 0.23
+    assert best_ask([]) is None
 
 
 def test_best_mid_uses_top_of_book_not_list_order():

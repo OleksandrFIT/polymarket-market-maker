@@ -24,6 +24,12 @@ def best_mid(bid_levels: list, ask_levels: list) -> float:
     return 0.5
 
 
+def best_ask(ask_levels: list):
+    """Best (lowest) ask price. CLOB /book returns asks descending, so reduce by min.
+    Returns None if there are no asks."""
+    return min((float(p) for p, _ in ask_levels), default=None)
+
+
 def queue_fill(price: float, size: float, placed_ts: float,
                bid_levels: list, tape: list) -> float:
     ahead = depth_ahead(bid_levels, price)
