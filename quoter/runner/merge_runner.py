@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from time import monotonic
+import time
 
 import httpx
 
@@ -35,6 +36,8 @@ from quoter.runner.trading_state import TradingState
 from quoter.runner.trend_detector import detect_bias, sigma_remaining
 from quoter.runner.tilt_planner import plan_tilt
 from quoter.runner.regime_tracker import RegimeTracker
+from quoter.runner.five_min_planner import plan_five_min
+from quoter.runner.paper_fill import PaperBook
 from quoter.strategy.ladder import compute_ladder
 
 log = get_logger("merge_runner")
@@ -262,7 +265,9 @@ class MergeRunner:
                         fresh_min_sec=FRESH_MIN_SEC, balanced=BALANCED,
                         already_traded=m.open_ts in self._traded_windows)
                     if enter:
-                        if self.requote and self.cfg.rungs > 1:
+                        if self.cfg.strategy == "five_min":
+                            await self._five_min_window(m, mid)
+                        elif self.requote and self.cfg.rungs > 1:
                             await self._ladder_window(m, mid)
                         elif self.requote:
                             await self._requote_window(m, mid)
@@ -717,6 +722,70 @@ class MergeRunner:
                  spent=round(total_cost, 2),
                  rtt_ms_min=round(min(rtt_samples), 1) if rtt_samples else None,
                  rtt_ms_avg=round(sum(rtt_samples) / len(rtt_samples), 1) if rtt_samples else None)
+
+    async def _five_min_window(self, m, mid_at_entry: float) -> None:
+        """5m early-consistent-leader (dry-run + paper-fill). Accumulate a leader-leaned
+        two-sided maker position from the open; at minute 2 keep only if the leader was
+        consistent (min1==min2) and in-band; hold to resolution; estimate PnL via PaperBook."""
+        self._traded_windows.add(m.open_ts)
+        self.state.windows_traded += 1
+        self.state.last_window = m.slug
+        log.info("fivemin_enter", slug=m.slug, mid=round(mid_at_entry, 3))
+
+        pb = PaperBook(fill_frac=max(0.1, self.cfg.paper_fill_prob_multiplier))
+        lead1 = lead2 = None
+        lead_price2 = 0.0
+        last_yes_mid = mid_at_entry
+        try:
+            while m.time_remaining() > END_BUFFER_SEC:
+                if self.state.force_stop_requested:
+                    break
+                try:
+                    async with httpx.AsyncClient(timeout=6) as cl:
+                        by = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.yes_token})).json()
+                        bn = (await cl.get("https://clob.polymarket.com/book", params={"token_id": m.no_token})).json()
+                except Exception:
+                    await asyncio.sleep(REQUOTE_SEC); continue
+                yb, ya = _best(by, "bids"), _best(by, "asks")
+                nb, na = _best(bn, "bids"), _best(bn, "asks")
+                if not (yb and ya and nb and na):
+                    await asyncio.sleep(REQUOTE_SEC); continue
+                yes_mid = (yb + ya) / 2
+                no_mid = (nb + na) / 2
+                last_yes_mid = yes_mid
+                minute = (time.time() - m.open_ts) / 60.0   # minutes since window open (wall clock)
+
+                cur_leader = "YES" if yes_mid >= no_mid else "NO"
+                if lead1 is None and minute >= 1:
+                    lead1 = cur_leader
+                if lead2 is None and minute >= 2:
+                    lead2 = cur_leader
+                    lead_price2 = yes_mid if cur_leader == "YES" else no_mid
+
+                plan = plan_five_min(minute, lead1, lead2, lead_price2, pb.spent(),
+                                     self.cfg.per_window_cap, self.cfg.lean,
+                                     self.cfg.band_lo, self.cfg.band_hi,
+                                     self.cfg.rung_size, yes_mid, no_mid)
+                for side, price, size in plan.orders:
+                    tok = m.yes_token if side == "YES" else m.no_token
+                    await self._place_limit(token_id=tok, price=price, size=size,
+                                            side="BUY", post_only=True)   # dry-run: logs only
+                    pb.post(side, price, size)
+
+                pb.on_tick("YES", ya)
+                pb.on_tick("NO", na)
+                self.state.pairs_caught = int(min(pb.inv["YES"], pb.inv["NO"]))
+                self.state.naked_shares = int(abs(pb.inv["YES"] - pb.inv["NO"]))
+                await asyncio.sleep(REQUOTE_SEC)
+        finally:
+            await self.cancel_all()   # dry-run no-op
+
+        winner = "YES" if last_yes_mid >= 0.5 else "NO"
+        paper_pnl = pb.inv[winner] - pb.spent()
+        passed = (lead1 is not None and lead1 == lead2)
+        log.info("fivemin_done", slug=m.slug, passed=passed, winner=winner,
+                 paper_spent=round(pb.spent(), 2), paper_pnl=round(paper_pnl, 2),
+                 inv_yes=round(pb.inv["YES"], 1), inv_no=round(pb.inv["NO"], 1))
 
     def shutdown(self) -> None:
         self._shutdown = True
