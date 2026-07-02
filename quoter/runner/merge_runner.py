@@ -158,7 +158,9 @@ class MergeRunner:
         — the caller picks the conservative fallback."""
         try:
             o = self._read_client().get_order(order_id) or {}
-            return float(o.get("size_matched", 0) or 0)
+            if "size_matched" not in o:
+                return None    # schema drift -> let the caller take its conservative fallback
+            return float(o.get("size_matched") or 0)
         except Exception:
             return None
 
