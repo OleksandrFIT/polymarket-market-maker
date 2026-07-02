@@ -14,13 +14,13 @@ class TBQuote:
 
 
 def _best_bid(book) -> float | None:
-    bids = (book or {}).get("bids", [])
-    return max((float(l["price"]) for l in bids), default=None)
+    bids = (book or {}).get("bids") or []
+    return max((float(lvl["price"]) for lvl in bids), default=None)
 
 
 def _best_ask(book) -> float | None:
-    asks = (book or {}).get("asks", [])
-    return min((float(l["price"]) for l in asks), default=None)
+    asks = (book or {}).get("asks") or []
+    return min((float(lvl["price"]) for lvl in asks), default=None)
 
 
 def plan_top_book(yes_book, no_book, inv_up: float, inv_dn: float,
@@ -41,17 +41,25 @@ def plan_top_book(yes_book, no_book, inv_up: float, inv_dn: float,
         if our >= 0.99:
             continue
         out.append(TBQuote(side, our, float(size)))
+    # Pair-cost sanity gate: books come from two sequential GETs; a move between them
+    # can leave our_up + our_dn > 1.0 (matched pair merges for exactly $1 -> guaranteed
+    # loss). Keep only the cheaper side; the pricier quote is the stale/risky one.
+    if len(out) == 2 and out[0].price + out[1].price > 0.999:
+        out = [min(out, key=lambda q: q.price)]
     return out
 
 
 def diff_quotes(current: dict, target: list[TBQuote]):
     """current: {side: (price, size)} of what we have resting.
-    Returns (sides_to_cancel, quotes_to_post). Unchanged quotes are kept (queue priority)."""
+    Returns (sides_to_cancel, quotes_to_post). A resting quote is kept iff its side is in
+    target at the SAME PRICE — size is intentionally ignored: partial fills keep queue
+    priority (cancelling a partially-filled order to repost full size would forfeit it).
+    No size top-up at the same price."""
     tgt = {q.side: q for q in target}
-    cancel = [s for s, (p, sz) in current.items()
-              if s not in tgt or (tgt[s].price, tgt[s].size) != (p, sz)]
+    cancel = [s for s, (p, _sz) in current.items()
+              if s not in tgt or tgt[s].price != p]
     post = [q for q in target
-            if q.side not in current or (current[q.side][0], current[q.side][1]) != (q.price, q.size)]
+            if q.side not in current or current[q.side][0] != q.price]
     return cancel, post
 
 

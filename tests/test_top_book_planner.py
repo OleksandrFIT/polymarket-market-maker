@@ -40,6 +40,14 @@ def test_empty_bids_skips_side():
     assert all(q.side != "Up" for q in qs)
 
 
+def test_pair_cost_gate_keeps_only_cheaper_side():
+    yes = {"bids": B([(0.52, 10)]), "asks": B([(0.60, 10)])}
+    no = {"bids": B([(0.48, 10)]), "asks": B([(0.56, 10)])}
+    # ours would be 0.521 + 0.481 = 1.002 > 0.999 -> keep only Down (cheaper)
+    qs = plan_top_book(yes, no, 0, 0, 10, 5, 0.001)
+    assert [(q.side, q.price) for q in qs] == [("Down", 0.481)]
+
+
 def test_diff_quotes_keep_cancel_post():
     cur = {"Up": (0.481, 5.0), "Down": (0.40, 5.0)}      # Down price now stale
     tgt = [TBQuote("Up", 0.481, 5.0), TBQuote("Down", 0.461, 5.0)]
@@ -52,6 +60,13 @@ def test_diff_quotes_cancels_side_missing_from_target():
     cur = {"Up": (0.481, 5.0)}
     cancel, post = diff_quotes(cur, [])                   # Up gated out now
     assert cancel == ["Up"] and post == []
+
+
+def test_diff_quotes_ignores_size_partial_fill_keeps_priority():
+    cur = {"Up": (0.481, 3.0)}                    # partially filled (was 5)
+    tgt = [TBQuote("Up", 0.481, 5.0)]
+    cancel, post = diff_quotes(cur, tgt)
+    assert cancel == [] and post == []            # keep: same price, queue priority preserved
 
 
 def test_plan_merge():
