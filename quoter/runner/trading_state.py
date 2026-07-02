@@ -30,6 +30,8 @@ class TradingState:
     windows_traded: int = 0
     pairs_caught: int = 0
     naked_shares: int = 0
+    merged_today: float = 0.0
+    redeemed_today: float = 0.0
     last_window: str = ""
     last_event: str = "idle"
 
@@ -94,6 +96,8 @@ class TradingState:
             "windows_traded": self.windows_traded,
             "pairs_caught": self.pairs_caught,
             "naked_shares": self.naked_shares,
+            "merged_today": self.merged_today,
+            "redeemed_today": self.redeemed_today,
             "last_window": self.last_window,
             "last_event": self.last_event,
         }

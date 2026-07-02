@@ -29,7 +29,14 @@ from quoter.runner.trading_state import TradingState
 from quoter.runner.merge_runner import MergeRunner
 from quoter.runner.control_dashboard import make_control_app
 
-if STRATEGY == "five_min":
+if STRATEGY == "top_book":
+    CFG = Config(
+        strategy="top_book", assets=("BTC",), timeframes=("5m",),
+        tb_size=5.0, tb_naked_cap=10.0, tb_tick=0.001, tb_merge_min=5.0,
+        per_window_cap=40.0, per_market_cap_usd=40.0, min_time_to_expiry_sec=5.0,
+        dry_run=True,                    # LIVE DISABLED
+    )
+elif STRATEGY == "five_min":
     CFG = Config(
         strategy="five_min", assets=("BTC",), timeframes=("5m",),
         lean=3, band_lo=0.62, band_hi=0.78, rung_size=5,

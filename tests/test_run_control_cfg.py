@@ -50,3 +50,14 @@ def test_live_cfg_is_momentum_tilt_step1():
     assert c.trend_confidence == 0.35
     # LIVE TRADING DISABLED — entry point is hardwired to dry-run only
     assert c.dry_run is True
+
+
+def test_top_book_cfg_is_dry_run():
+    rc = _load_rc("top_book")
+    c = rc.CFG
+    assert c.dry_run is True                  # LIVE DISABLED
+    assert c.strategy == "top_book"
+    assert c.timeframes == ("5m",)
+    assert c.tb_size == 5.0
+    assert c.tb_naked_cap == 10.0
+    assert c.per_window_cap == 40.0
