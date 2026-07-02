@@ -915,6 +915,12 @@ class MergeRunner:
                         self.state.fills_window = inv["Up"] + inv["Down"] + 2 * merged
                         self.state.matched_pct = (100 * 2 * merged
                                                   / max(self.state.fills_window, 1e-9))
+                        # exact per-tick quote state — the shadow-fill harness's ground
+                        # truth (a place-only log can't see cancels/gates and would credit
+                        # us stale toxic fills the live bot dodges)
+                        log.info("topbook_quotes", slug=m.slug,
+                                 up=(resting.get("Up") or (None, None))[0],
+                                 dn=(resting.get("Down") or (None, None))[0])
                     except Exception as e:
                         log.warning("topbook_tick_err", error=str(e))
                     await asyncio.sleep(REQUOTE_SEC)
