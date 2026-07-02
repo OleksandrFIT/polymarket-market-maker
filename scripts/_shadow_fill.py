@@ -46,8 +46,14 @@ print("windows with intent logs:", len(slugs))
 tokmap = {}
 for slug in slugs:
     try:
-        g = json.load(urllib.request.urlopen(urllib.request.Request(
-            "https://gamma-api.polymarket.com/markets?slug=%s" % slug, headers=UA), timeout=15))
+        g = None
+        # resolved 5m markets are DE-INDEXED without closed=true — try both
+        for extra in ("", "&closed=true"):
+            g = json.load(urllib.request.urlopen(urllib.request.Request(
+                "https://gamma-api.polymarket.com/markets?slug=%s%s" % (slug, extra),
+                headers=UA), timeout=15))
+            if g:
+                break
         toks = json.loads(g[0]["clobTokenIds"])
         tokmap[toks[0]] = (slug, "Up")
         tokmap[toks[1]] = (slug, "Down")
