@@ -66,3 +66,18 @@ def diff_quotes(current: dict, target: list[TBQuote]):
 def plan_merge(inv_up: float, inv_dn: float, merge_min: float) -> float:
     m = min(inv_up, inv_dn)
     return m if m >= merge_min else 0.0
+
+
+def committed_gate(cost_up: float, cost_dn: float, resting: dict,
+                   quote: TBQuote, cap: float) -> bool:
+    """Committed-capital gate: may `quote` be posted without breaching `cap`?
+
+    committed = realized cost basis (NEVER decremented — not even after a merge,
+    so worst-case gross spend stays bounded if merge fails) + notional of orders
+    still resting ({side: (price, size)}). True iff committed + quote notional
+    stays strictly below cap (exactly-at-cap is blocked — conservative for live
+    money; a cancelled-then-repriced side is not in `resting`, so a reprice at
+    unchanged notional passes).
+    """
+    committed = cost_up + cost_dn + sum(p * sz for (p, sz) in resting.values())
+    return committed + quote.price * quote.size < cap

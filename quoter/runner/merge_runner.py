@@ -37,7 +37,7 @@ from quoter.runner.trend_detector import detect_bias, sigma_remaining
 from quoter.runner.tilt_planner import plan_tilt
 from quoter.runner.regime_tracker import RegimeTracker
 from quoter.runner.five_min_planner import plan_five_min
-from quoter.runner.top_book_planner import plan_top_book, diff_quotes, plan_merge
+from quoter.runner.top_book_planner import plan_top_book, diff_quotes, plan_merge, committed_gate
 from quoter.runner.paper_fill import PaperBook
 from quoter.strategy.ladder import compute_ladder
 
@@ -151,6 +151,16 @@ class MergeRunner:
             if oid:
                 ids.add(oid)
         return ids
+
+    def _order_matched(self, order_id: str) -> float | None:
+        """Matched (filled) size of an order via the read client's GET /order/{id}
+        (same py_clob_client_v2 client `_open_order_ids` uses). None on any failure
+        — the caller picks the conservative fallback."""
+        try:
+            o = self._read_client().get_order(order_id) or {}
+            return float(o.get("size_matched", 0) or 0)
+        except Exception:
+            return None
 
     async def _place_limit(self, **kw):
         """Place a limit order, or in dry_run just log the INTENDED order and return
@@ -799,22 +809,25 @@ class MergeRunner:
     async def _top_book_window(self, m, mid_at_entry: float) -> None:
         """Top-of-book MM (phase-27): keep bid best+tick on BOTH sides, skew-cap naked,
         merge matched pairs (via positions_ops when live; logged intent in dry-run),
-        never sell. Spend bounded by per_window_cap even if merge fails."""
+        never sell. Spend bounded by per_window_cap on COMMITTED capital = realized
+        cost basis (never decremented, not even after merge — bounds worst-case gross
+        spend if merge fails) + resting notional."""
         self._traded_windows.add(m.open_ts)
         self.state.windows_traded += 1
         self.state.last_window = m.slug
         self.state.last_event = f"topbook {m.slug}"
+        self.state.fills_window = 0.0
+        self.state.matched_pct = 0.0
         log.info("topbook_enter", slug=m.slug, mid=round(mid_at_entry, 3))
-        inv = {"Up": 0.0, "Down": 0.0}     # filled (LocalInventory-style credit below)
-        cost = {"Up": 0.0, "Down": 0.0}
-        posted_usd = 0.0                    # lag-proof spend backstop (counts what we SEND)
+        inv = {"Up": 0.0, "Down": 0.0}     # filled (credit-on-vanish + partial credit)
+        cost = {"Up": 0.0, "Down": 0.0}    # realized cost basis — NEVER decremented
         resting: dict[str, tuple[float, float]] = {}   # side -> (price, size)
         oids: dict[str, list[str]] = {"Up": [], "Down": []}
         merged = 0.0
         tok = {"Up": m.yes_token, "Down": m.no_token}
         try:
             async with httpx.AsyncClient(timeout=8) as cl:
-                while m.time_remaining() > self.cfg.min_time_to_expiry_sec and not self._shutdown:
+                while m.time_remaining() > END_BUFFER_SEC and not self._shutdown:
                     if self.state.drain_force_stop():
                         await self.cancel_all()   # immediate; finally is the backstop
                         return
@@ -822,55 +835,93 @@ class MergeRunner:
                         by = (await cl.get("https://clob.polymarket.com/book", params={"token_id": tok["Up"]})).json()
                         bn = (await cl.get("https://clob.polymarket.com/book", params={"token_id": tok["Down"]})).json()
                     except Exception:
-                        await asyncio.sleep(LOOP_SEC)
+                        await asyncio.sleep(REQUOTE_SEC)
                         continue
-                    target = plan_top_book(by, bn, inv["Up"], inv["Down"],
-                                           self.cfg.tb_naked_cap, self.cfg.tb_size, self.cfg.tb_tick)
-                    # spend cap: drop new posts once posted notional would exceed the cap
-                    target = [q for q in target
-                              if posted_usd + q.price * q.size <= self.cfg.per_window_cap + 1e-9
-                              or q.side in resting]
-                    cancel, post = diff_quotes(resting, target)
-                    for side in cancel:
-                        await self._cancel_orders(oids.get(side, []))
-                        oids[side] = []
-                        resting.pop(side, None)
-                    for q in post:
-                        r = await self._place_limit(token_id=tok[q.side], price=q.price,
-                                                    size=q.size, side="BUY", post_only=True)
-                        if r and r.get("order_id"):
-                            oids[q.side] = [r["order_id"]]
-                        resting[q.side] = (q.price, q.size)
-                        posted_usd += q.price * q.size
-                    # fills: credit-on-vanish (LIVE) — in dry_run open-orders are empty and
-                    # resting was never real, so nothing credits (mechanics-only dry run).
-                    if not self.cfg.dry_run:
-                        open_ids = self._open_order_ids()
-                        for side in ("Up", "Down"):
-                            gone = [o for o in oids[side] if o not in open_ids]
-                            if gone and side in resting:
-                                p, sz = resting.pop(side)
-                                oids[side] = []
-                                inv[side] += sz
-                                cost[side] += sz * p
-                                log.info("topbook_fill", side=side, price=p, size=sz)
-                    # merge matched pairs
-                    mq = plan_merge(inv["Up"], inv["Down"], self.cfg.tb_merge_min)
-                    if mq > 0:
-                        ok = await self._merge_pairs(m, mq)   # dry_run -> logs intent, True
-                        if ok:
-                            inv["Up"] -= mq
-                            inv["Down"] -= mq
-                            merged += mq
-                            self.state.merged_today += mq
-                    self.state.pairs_caught = int(min(inv["Up"], inv["Down"]))
-                    self.state.naked_shares = int(abs(inv["Up"] - inv["Down"]))
-                    await asyncio.sleep(LOOP_SEC)
+                    # The whole mutate section (cancels + posts + fill-credit + merge)
+                    # is try/excepted like the book GETs: one transient API error must
+                    # not abort the window; the finally cancel_all stays the backstop.
+                    try:
+                        target = plan_top_book(by, bn, inv["Up"], inv["Down"],
+                                               self.cfg.tb_naked_cap, self.cfg.tb_size, self.cfg.tb_tick)
+                        cancel, post = diff_quotes(resting, target)
+                        for side in cancel:
+                            # partial fills: credit the matched portion BEFORE clearing
+                            # so inv/cost/merge/skew see reality (live only; lookup
+                            # failure -> no credit, same as before).
+                            if not self.cfg.dry_run and side in resting and oids.get(side):
+                                p, _sz = resting[side]
+                                matched = self._order_matched(oids[side][0])
+                                if matched:
+                                    inv[side] += matched
+                                    cost[side] += matched * p
+                                    log.info("topbook_partial_fill", side=side, price=p,
+                                             matched=matched)
+                            await self._cancel_orders(oids.get(side, []))
+                            oids[side] = []
+                            resting.pop(side, None)
+                        for q in post:
+                            # committed-capital gate, re-checked per post: each approved
+                            # quote lands in `resting` (counted below) before the next
+                            # check, so several same-tick posts can't jointly overshoot.
+                            if not committed_gate(cost["Up"], cost["Down"], resting, q,
+                                                  self.cfg.per_window_cap):
+                                continue
+                            r = await self._place_limit(token_id=tok[q.side], price=q.price,
+                                                        size=q.size, side="BUY", post_only=True)
+                            if self.cfg.dry_run:
+                                # placement is a logged no-op — resting tracks INTENT or
+                                # the diff would re-post (and re-log) every tick.
+                                resting[q.side] = (q.price, q.size)
+                            elif r and r.get("order_id"):
+                                # live: only a real order id becomes resting/committed —
+                                # a failed placement must not leave a phantom quote.
+                                oids[q.side] = [r["order_id"]]
+                                resting[q.side] = (q.price, q.size)
+                        # fills: credit-on-vanish (LIVE) — in dry_run open-orders are empty
+                        # and resting was never real, so nothing credits (mechanics-only).
+                        if not self.cfg.dry_run:
+                            open_ids = self._open_order_ids()
+                            for side in ("Up", "Down"):
+                                gone = [o for o in oids[side] if o not in open_ids]
+                                if gone and side in resting:
+                                    p, sz = resting.pop(side)
+                                    oids[side] = []
+                                    matched = self._order_matched(gone[0])
+                                    if matched is None:
+                                        # status lookup failed: assume FULL fill — over-
+                                        # crediting inflates cost, so the cap only ever
+                                        # TIGHTENS (fail-conservative for spend).
+                                        matched = sz
+                                        log.info("topbook_fill_assumed", side=side, price=p,
+                                                 size=sz)
+                                    if matched > 0:
+                                        inv[side] += matched
+                                        cost[side] += matched * p
+                                        log.info("topbook_fill", side=side, price=p,
+                                                 size=matched)
+                        # merge matched pairs (cost basis intentionally NOT reduced)
+                        mq = plan_merge(inv["Up"], inv["Down"], self.cfg.tb_merge_min)
+                        if mq > 0:
+                            ok = await self._merge_pairs(m, mq)   # dry_run -> logs intent, True
+                            if ok:
+                                inv["Up"] -= mq
+                                inv["Down"] -= mq
+                                merged += mq
+                                self.state.merged_today += mq
+                        self.state.pairs_caught = int(min(inv["Up"], inv["Down"]))
+                        self.state.naked_shares = int(abs(inv["Up"] - inv["Down"]))
+                        self.state.fills_window = inv["Up"] + inv["Down"] + 2 * merged
+                        self.state.matched_pct = (100 * 2 * merged
+                                                  / max(self.state.fills_window, 1e-9))
+                    except Exception as e:
+                        log.warning("topbook_tick_err", error=str(e))
+                    await asyncio.sleep(REQUOTE_SEC)
         finally:
             await self.cancel_all()
+        committed = cost["Up"] + cost["Down"] + sum(p * sz for (p, sz) in resting.values())
         log.info("topbook_done", slug=m.slug, merged=merged,
                  inv_up=inv["Up"], inv_dn=inv["Down"],
-                 spent=round(cost["Up"] + cost["Down"], 2), posted=round(posted_usd, 2))
+                 spent=round(cost["Up"] + cost["Down"], 2), committed=round(committed, 2))
 
     async def _redeem_sweeper(self) -> None:
         """Every 60s: redeem resolved positions so capital returns to cash. Dry-run: log only.
@@ -887,7 +938,9 @@ class MergeRunner:
                             continue
                         from quoter.chain.positions_ops import redeem
                         if redeem(p.get("conditionId")):
-                            self.state.redeemed_today += float(p.get("size", 0))
+                            # dollar value returned to cash (losing side redeems ~$0),
+                            # not share count — the metric is USD recovered.
+                            self.state.redeemed_today += float(p.get("currentValue", 0) or 0)
             except Exception as e:
                 log.warning("redeem_sweeper_err", error=str(e))
             await asyncio.sleep(60)

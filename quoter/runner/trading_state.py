@@ -32,6 +32,8 @@ class TradingState:
     naked_shares: int = 0
     merged_today: float = 0.0
     redeemed_today: float = 0.0
+    fills_window: float = 0.0    # gross fills this window (inv both sides + merged pairs*2)
+    matched_pct: float = 0.0     # % of window fills that ended up in merged pairs
     last_window: str = ""
     last_event: str = "idle"
 
@@ -98,6 +100,8 @@ class TradingState:
             "naked_shares": self.naked_shares,
             "merged_today": self.merged_today,
             "redeemed_today": self.redeemed_today,
+            "fills_window": self.fills_window,
+            "matched_pct": self.matched_pct,
             "last_window": self.last_window,
             "last_event": self.last_event,
         }
