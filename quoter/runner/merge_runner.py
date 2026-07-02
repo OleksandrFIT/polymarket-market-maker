@@ -274,7 +274,10 @@ class MergeRunner:
                 if self.state.drain_force_stop():
                     n = await self.cancel_all()
                     self.state.last_event = f"FORCE STOP — cancelled {n} resting"
-                m, mid = await self._current_window()
+                # hard total deadline: a Cloudflare event-page GET can drip its body
+                # forever (per-chunk read timeout never fires) — froze the loop for 12h
+                # on 2026-07-02. TimeoutError lands in runner_loop_err -> next iteration.
+                m, mid = await asyncio.wait_for(self._current_window(), timeout=25)
                 if m is not None:
                     enter = self.state.should_enter(
                         window_open_ts=m.open_ts, time_left=m.time_remaining(), mid=mid,
