@@ -84,6 +84,7 @@ class MergeRunner:
         self._regime = RegimeTracker(cfg.regime_window, cfg.regime_min_samples,
                                      cfg.regime_min_ev, cfg.tilt_fee)
         self._binance_task = None
+        self._redeem_task = None
 
     async def _on_btc(self, asset: str, price: float, ts: float) -> None:
         """BinanceWS callback: append to the rolling buffer (arrival-time stamped) and
@@ -254,6 +255,8 @@ class MergeRunner:
         log.info("runner_started", mode=self.state.mode)
         if self._binance is not None and self._binance_task is None:
             self._binance_task = asyncio.create_task(self._binance.run())
+        if self.cfg.strategy == "top_book" and self._redeem_task is None:
+            self._redeem_task = asyncio.create_task(self._redeem_sweeper())
         while not self._shutdown:
             try:
                 if self.state.drain_force_stop():
@@ -868,6 +871,26 @@ class MergeRunner:
         log.info("topbook_done", slug=m.slug, merged=merged,
                  inv_up=inv["Up"], inv_dn=inv["Down"],
                  spent=round(cost["Up"] + cost["Down"], 2), posted=round(posted_usd, 2))
+
+    async def _redeem_sweeper(self) -> None:
+        """Every 60s: redeem resolved positions so capital returns to cash. Dry-run: log only.
+        Isolated loop — its failure never stops quoting (every pass is fully try/excepted)."""
+        while not self._shutdown:
+            try:
+                async with httpx.AsyncClient(timeout=10) as cl:
+                    r = await cl.get("https://data-api.polymarket.com/positions",
+                                     params={"user": self.creds.funder, "redeemable": "true",
+                                             "sizeThreshold": 1, "limit": 100})
+                    for p in (r.json() if r.status_code == 200 else []):
+                        if self.cfg.dry_run:
+                            log.info("dryrun_redeem", slug=p.get("slug"), size=p.get("size"))
+                            continue
+                        from quoter.chain.positions_ops import redeem
+                        if redeem(p.get("conditionId")):
+                            self.state.redeemed_today += float(p.get("size", 0))
+            except Exception as e:
+                log.warning("redeem_sweeper_err", error=str(e))
+            await asyncio.sleep(60)
 
     async def _merge_pairs(self, m, qty: float) -> bool:
         """Merge qty matched Up/Down pairs back to USDC. Dry-run: log intent only."""
