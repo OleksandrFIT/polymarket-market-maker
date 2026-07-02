@@ -224,3 +224,17 @@ operator authorization with the operator's UI-created Relayer API key
 (`POLY_RELAYER_API_KEY` / `POLY_RELAYER_API_KEY_ADDRESS`). Key-auth POST
 `/submit` is NOT yet exercised end-to-end — that is exactly what the acceptance
 merge validates.
+
+## ACCEPTANCE PASSED (2026-07-02, operator-approved step A)
+
+Real relayer transaction executed from the server wallet via the NEW key-auth path:
+- auth mode: `key` (`POLY_RELAYER_API_KEY` headers)
+- op: `redeem(0x80f086f7024999b5590eba4a4947a75f152e046322ab0819208716e5f8242bcd)`
+  (btc-updown-5m-1774036200, 1000 worthless Down shares, value $0.00 — zero-risk probe)
+- relayer transaction id: 019f23c6-cdef-7bae-a5d4-4e0f8fa382d4
+- tx hash: 0x767cdbde5c2e76e424780a9637b0c29112d7c76be027bf5979a83c5bed6c57c6 (MINED/CONFIRMED, gasless)
+- post-check: position gone from wallet (31 redeemable left)
+
+This proves the full Path A chain end-to-end (key-auth -> POST /submit -> proxy exec ->
+confirmation polling). merge_pairs uses the identical transport with different calldata;
+its first natural pair on the attended live test serves as the merge acceptance.
