@@ -6,8 +6,12 @@ Two execution paths, selected automatically:
 
 * Path A (preferred, gasless): the official Polymarket relayer
   (``py-builder-relayer-client``) executes the call AS the proxy wallet, gas paid
-  by Polymarket. Requires a Relayer API key (Polymarket web UI: Settings > API Keys)
-  in env ``POLY_BUILDER_API_KEY`` / ``POLY_BUILDER_SECRET`` / ``POLY_BUILDER_PASSPHRASE``.
+  by Polymarket. Two auth schemes, resolved in order:
+    1. NEW key auth — env ``POLY_RELAYER_API_KEY`` + ``POLY_RELAYER_API_KEY_ADDRESS``
+       (Polymarket web UI: Settings > API Keys), sent as HTTP headers
+       ``RELAYER_API_KEY`` / ``RELAYER_API_KEY_ADDRESS``.
+    2. OLD HMAC builder auth — env ``POLY_BUILDER_API_KEY`` / ``POLY_BUILDER_SECRET``
+       / ``POLY_BUILDER_PASSPHRASE`` (signed ``POLY_BUILDER_*`` headers).
 * Path B (fallback, direct): the owner EOA sends the tx itself and pays POL gas
   (~$0.01/tx; keep ~1-2 POL on the EOA). For ``POLY_SIGNATURE_TYPE=1`` the EOA calls
   ``ProxyWalletFactory.proxy(calls)`` which routes through the EOA's proxy wallet;
@@ -18,11 +22,16 @@ Env consumed (names only — values are NEVER logged by this module):
     POLY_PRIVATE_KEY        owner EOA key (signs relayer request / direct tx)
     POLY_FUNDER_ADDRESS     proxy wallet address holding the positions
     POLY_SIGNATURE_TYPE     0 = EOA, 1 = Polymarket proxy, 2 = Gnosis Safe (default 1)
+    POLY_RELAYER_API_KEY          \\ Path A NEW relayer key auth (optional; takes
+    POLY_RELAYER_API_KEY_ADDRESS  /  precedence over the HMAC triple below)
     POLY_BUILDER_API_KEY    \\
     POLY_BUILDER_SECRET      } Path A relayer HMAC creds (optional; enables gasless)
     POLY_BUILDER_PASSPHRASE /
     POLY_RELAYER_URL        relayer host (default https://relayer-v2.polymarket.com)
     POLY_RPC_URL            Polygon JSON-RPC (default https://polygon-rpc.com)
+
+Self-check (read-only, NO transactions):
+    python -m quoter.chain.positions_ops --check [condition_id]
 
 Contract addresses (verified on polygonscan 2026-07-02, see spike notes):
     ConditionalTokens  0x4D97DCd97eC945f40cF65F87097ACe5EA0476045
@@ -47,6 +56,7 @@ the functions that need them. Read-only chain queries use eth_abi + httpx only
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import httpx
 import structlog
@@ -87,6 +97,10 @@ def _rpc_url() -> str:
     return os.environ.get("POLY_RPC_URL", "").strip() or DEFAULT_RPC_URL
 
 
+def _relayer_base_url() -> str:
+    return os.environ.get("POLY_RELAYER_URL", "").strip() or DEFAULT_RELAYER_URL
+
+
 def _proxy_address() -> str | None:
     addr = os.environ.get("POLY_FUNDER_ADDRESS", "").strip()
     return addr or None
@@ -101,6 +115,23 @@ def _relayer_creds_present() -> bool:
         os.environ.get(k, "").strip()
         for k in ("POLY_BUILDER_API_KEY", "POLY_BUILDER_SECRET", "POLY_BUILDER_PASSPHRASE")
     )
+
+
+def _relayer_key_headers() -> dict[str, str] | None:
+    """HTTP headers for the NEW relayer key-auth scheme, or None when not configured.
+
+    Values are read from ``POLY_RELAYER_API_KEY`` / ``POLY_RELAYER_API_KEY_ADDRESS``
+    and attached to relayer requests as headers only — never logged or printed.
+    """
+    key = os.environ.get("POLY_RELAYER_API_KEY", "").strip()
+    address = os.environ.get("POLY_RELAYER_API_KEY_ADDRESS", "").strip()
+    if key and address:
+        return {"RELAYER_API_KEY": key, "RELAYER_API_KEY_ADDRESS": address}
+    return None
+
+
+def _relayer_key_auth_present() -> bool:
+    return _relayer_key_headers() is not None
 
 
 # ── ABI encoding (Gnosis ConditionalTokens) ──
@@ -234,18 +265,80 @@ def _detect_collateral(owner: str, condition_id: str, min_pair_units: int) -> st
 # ── Execution: Path A (gasless relayer) ──
 
 
-def _execute_via_relayer(calldata: bytes) -> bool:
-    """Execute ``calldata`` against the CTF as the proxy wallet via the Polymarket
-    relayer (gasless). Requires relayer API creds + POLY_PRIVATE_KEY."""
+def _build_relay_client(tx_type: object) -> Any:
+    """Construct a RelayClient using the strongest configured auth scheme.
+
+    1. NEW key auth (``POLY_RELAYER_API_KEY`` + ``POLY_RELAYER_API_KEY_ADDRESS``):
+       py-builder-relayer-client 0.0.2 (latest on PyPI, checked 2026-07-02) is
+       HMAC-only; its auth headers are generated in exactly ONE place —
+       ``RelayClient._post_request`` -> ``_generate_builder_headers`` (all GET
+       endpoints are sent unauthenticated). Least invasive override: a subclass
+       that replaces ``_post_request`` to attach the key-auth headers and no-ops
+       ``assert_builder_creds_needed`` (the guard in ``execute()``); payload
+       construction/signing (nonce, relay-payload, proxy encoding, EOA signature)
+       is inherited unchanged.
+    2. OLD HMAC builder creds (``POLY_BUILDER_*``): stock client behavior.
+
+    Values of the env vars are passed to the client / headers only — never logged.
+    """
     from py_builder_relayer_client.client import (  # type: ignore[import-untyped]
         RelayClient,  # lazy: optional dep
     )
-    from py_builder_relayer_client.models import (  # type: ignore[import-untyped]
-        RelayerTxType,
-        Transaction,
+    from py_builder_relayer_client.http_helpers.helpers import (  # type: ignore[import-untyped]
+        post as relayer_post,
     )
+
+    common: dict[str, Any] = {
+        "relayer_url": _relayer_base_url(),
+        "chain_id": CHAIN_ID,
+        "private_key": os.environ["POLY_PRIVATE_KEY"].strip(),
+        "relay_tx_type": tx_type,
+        "rpc_url": _rpc_url(),
+    }
+
+    key_headers = _relayer_key_headers()
+    if key_headers is not None:
+
+        class _KeyAuthRelayClient(RelayClient):  # type: ignore[misc]
+            """RelayClient authenticated with RELAYER_API_KEY headers (new scheme)."""
+
+            def assert_builder_creds_needed(self) -> None:
+                return None  # key-auth headers replace HMAC builder creds
+
+            def _post_request(
+                self, method: str, request_path: str, body: dict[str, Any] | None = None
+            ) -> Any:
+                return relayer_post(
+                    f"{self.relayer_url}{request_path}", headers=key_headers, data=body
+                )
+
+        log.info("relayer_auth_mode", mode="key")
+        return _KeyAuthRelayClient(**common)
+
     from py_builder_signing_sdk.config import BuilderConfig  # type: ignore[import-untyped]
     from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds  # type: ignore[import-untyped]
+
+    log.info("relayer_auth_mode", mode="hmac")
+    return RelayClient(
+        builder_config=BuilderConfig(
+            local_builder_creds=BuilderApiKeyCreds(
+                key=os.environ["POLY_BUILDER_API_KEY"].strip(),
+                secret=os.environ["POLY_BUILDER_SECRET"].strip(),
+                passphrase=os.environ["POLY_BUILDER_PASSPHRASE"].strip(),
+            )
+        ),
+        **common,
+    )
+
+
+def _execute_via_relayer(calldata: bytes) -> bool:
+    """Execute ``calldata`` against the CTF as the proxy wallet via the Polymarket
+    relayer (gasless). Requires POLY_PRIVATE_KEY + one relayer auth scheme
+    (key auth preferred, HMAC fallback — see ``_build_relay_client``)."""
+    from py_builder_relayer_client.models import (  # type: ignore[import-untyped]
+        RelayerTxType,  # lazy: optional dep
+        Transaction,
+    )
 
     sig_type = _sig_type()
     if sig_type == 1:
@@ -256,20 +349,7 @@ def _execute_via_relayer(calldata: bytes) -> bool:
         log.warning("relayer_unsupported_sig_type", sig_type=sig_type)
         return False
 
-    client = RelayClient(
-        relayer_url=os.environ.get("POLY_RELAYER_URL", "").strip() or DEFAULT_RELAYER_URL,
-        chain_id=CHAIN_ID,
-        private_key=os.environ["POLY_PRIVATE_KEY"].strip(),
-        builder_config=BuilderConfig(
-            local_builder_creds=BuilderApiKeyCreds(
-                key=os.environ["POLY_BUILDER_API_KEY"].strip(),
-                secret=os.environ["POLY_BUILDER_SECRET"].strip(),
-                passphrase=os.environ["POLY_BUILDER_PASSPHRASE"].strip(),
-            )
-        ),
-        relay_tx_type=tx_type,
-        rpc_url=_rpc_url(),
-    )
+    client = _build_relay_client(tx_type)
     resp = client.execute(
         [Transaction(to=to_checksum_address(CTF_ADDRESS), data="0x" + calldata.hex(), value="0")],
         metadata="poly-quoter positions_ops",
@@ -324,11 +404,15 @@ def _execute_direct(calldata: bytes) -> bool:
 
 
 def _execute(calldata: bytes) -> bool:
-    """Route to relayer (gasless) when creds are configured, else direct on-chain."""
+    """Route: relayer key-auth > relayer HMAC > direct on-chain (web3).
+
+    Path A (gasless relayer) is taken when EITHER auth scheme is configured;
+    inside it, key auth wins over HMAC (see ``_build_relay_client``).
+    """
     if not os.environ.get("POLY_PRIVATE_KEY", "").strip():
         log.error("positions_ops_missing_private_key_env")
         return False
-    if _relayer_creds_present():
+    if _relayer_key_auth_present() or _relayer_creds_present():
         return _execute_via_relayer(calldata)
     return _execute_direct(calldata)
 
@@ -387,3 +471,124 @@ def redeem(condition_id: str) -> bool:
     except Exception:
         log.exception("redeem_error", condition_id=condition_id)
         return False
+
+
+# ── Read-only self-check CLI (python -m quoter.chain.positions_ops --check) ──
+
+_COLLATERAL_NAMES = {USDCE_ADDRESS: "USDC.e", PUSD_ADDRESS: "pUSD"}
+
+
+def _check_relayer_nonce() -> tuple[bool, str]:
+    """GET {relayer}/nonce for the signer EOA, attaching key-auth headers when
+    configured. Read-only; proves relayer reachability + address derivation."""
+    private_key = os.environ.get("POLY_PRIVATE_KEY", "").strip()
+    if not private_key:
+        return False, "skipped (POLY_PRIVATE_KEY missing)"
+    from eth_account import Account  # lazy: keeps module import-safe without it
+
+    signer = Account.from_key(private_key).address
+    tx_type = "SAFE" if _sig_type() == 2 else "PROXY"
+    key_headers = _relayer_key_headers()
+    resp = httpx.get(
+        f"{_relayer_base_url()}/nonce",
+        params={"address": signer, "type": tx_type},
+        headers=key_headers or {},
+        timeout=_RPC_TIMEOUT_S,
+    )
+    auth = "key-auth headers" if key_headers is not None else "no auth headers"
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    ok = resp.status_code == 200 and isinstance(body, dict) and body.get("nonce") is not None
+    return ok, f"HTTP {resp.status_code}, {auth}, nonce {'present' if ok else 'absent'}"
+
+
+def _check_collateral(condition_id: str) -> tuple[bool, str]:
+    """Read the proxy's pair balances for both collateral candidates (eth_call only)."""
+    proxy = _proxy_address()
+    if proxy is None:
+        return False, "skipped (POLY_FUNDER_ADDRESS missing)"
+    parts: list[str] = []
+    detected: str | None = None
+    for collateral in _COLLATERAL_CANDIDATES:
+        up, down = _pair_balances(proxy, collateral, condition_id)
+        parts.append(f"{_COLLATERAL_NAMES[collateral]} up={up} down={down}")
+        if detected is None and (up > 0 or down > 0):
+            detected = _COLLATERAL_NAMES[collateral]
+    verdict = f"detected {detected}" if detected else "no position held (ops would no-op)"
+    return True, f"{verdict}; units: {', '.join(parts)}"
+
+
+def _run_check(condition_id: str | None) -> int:
+    """Run all read-only checks, print PASS/FAIL lines. NEVER sends a transaction.
+
+    Prints env var NAMES and presence only — values are never printed.
+    """
+    try:  # convenience: pick up the server/operator .env like the runbooks do
+        from dotenv import load_dotenv
+
+        load_dotenv(".env")
+    except ImportError:
+        pass
+
+    exit_code = 0
+
+    def line(name: str, ok: bool, detail: str) -> None:
+        nonlocal exit_code
+        if not ok:
+            exit_code = 1
+        print(f"{'PASS' if ok else 'FAIL'}  {name}: {detail}")
+
+    for env_name in ("POLY_PRIVATE_KEY", "POLY_FUNDER_ADDRESS"):
+        present = bool(os.environ.get(env_name, "").strip())
+        line(f"env {env_name}", present, "present" if present else "missing")
+
+    if _relayer_key_auth_present():
+        mode = "key-auth (POLY_RELAYER_API_KEY + POLY_RELAYER_API_KEY_ADDRESS)"
+    elif _relayer_creds_present():
+        mode = "hmac (POLY_BUILDER_API_KEY/SECRET/PASSPHRASE)"
+    else:
+        mode = "none -> Path B direct on-chain (web3, EOA pays gas)"
+    line("relayer auth mode", True, mode)
+
+    try:
+        ok, detail = _check_relayer_nonce()
+    except Exception as exc:  # network/parse errors must not print secrets
+        ok, detail = False, f"error ({type(exc).__name__})"
+    line("relayer reachability (GET /nonce)", ok, detail)
+
+    if condition_id is not None:
+        try:
+            ok, detail = _check_collateral(condition_id)
+        except Exception as exc:
+            ok, detail = False, f"error ({type(exc).__name__})"
+        line(f"collateral detection {condition_id}", ok, detail)
+
+    print("self-check complete — no transactions were sent")
+    return exit_code
+
+
+def _main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m quoter.chain.positions_ops",
+        description="Read-only self-check for the positions-ops relayer/chain setup. "
+        "Never sends transactions; never prints env values.",
+    )
+    parser.add_argument("--check", action="store_true", help="run the read-only self-check")
+    parser.add_argument(
+        "condition_id",
+        nargs="?",
+        default=None,
+        help="optional condition id (0x…, 32 bytes) for collateral detection",
+    )
+    args = parser.parse_args(argv)
+    if not args.check:
+        parser.error("nothing to do: pass --check (this CLI is read-only by design)")
+    return _run_check(args.condition_id)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

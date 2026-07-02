@@ -7,12 +7,15 @@ operator-gated, see procedure at the bottom).
 
 ## Chosen path: A (gasless relayer) primary, B (direct on-chain) automatic fallback
 
-The module picks the path at call time:
+The module picks the path at call time (auth resolution order, updated 2026-07-02):
 
-- **Path A** when `POLY_BUILDER_API_KEY` / `POLY_BUILDER_SECRET` / `POLY_BUILDER_PASSPHRASE`
-  are set: executes via the official Polymarket relayer — the same infra the UI uses;
-  gas paid by Polymarket, the tx runs AS the proxy wallet. Uses the official Python
-  client `py-builder-relayer-client==0.0.2` (github.com/Polymarket/py-builder-relayer-client).
+- **Path A, key auth (NEW scheme, preferred)** when `POLY_RELAYER_API_KEY` +
+  `POLY_RELAYER_API_KEY_ADDRESS` are BOTH set: executes via the official Polymarket
+  relayer authenticating with plain HTTP headers `RELAYER_API_KEY` /
+  `RELAYER_API_KEY_ADDRESS` (this is what the operator's UI-created key provides).
+- **Path A, HMAC (old scheme)** else, when `POLY_BUILDER_API_KEY` /
+  `POLY_BUILDER_SECRET` / `POLY_BUILDER_PASSPHRASE` are set: signed
+  `POLY_BUILDER_*` headers via `py-builder-signing-sdk` (stock client behavior).
 - **Path B** otherwise: the owner EOA (`POLY_PRIVATE_KEY`) sends the tx itself via
   `web3==7.16.0` and pays POL gas. For `POLY_SIGNATURE_TYPE=1` it calls
   `ProxyWalletFactory.proxy(calls)` which executes through the EOA's proxy wallet;
@@ -35,11 +38,24 @@ and contract addresses in `config.py`. A separate library was required.
 
 - Docs: docs.polymarket.com "Gasless Transactions" (`developers/builders/relayer-client`).
 - Relayer host: `https://relayer-v2.polymarket.com`.
-- Auth: **Relayer API key** (HMAC key/secret/passphrase) — created in the Polymarket
-  web UI under **Settings > API Keys**; existing HMAC builder keys also work.
-  Requests are signed with `py-builder-signing-sdk` (`BuilderConfig` +
-  `BuilderApiKeyCreds`); without creds `RelayClient.execute()` raises — there is no
-  keyless relayer access.
+- Auth — the relayer accepts EITHER scheme (verified via official docs 2026-07-02):
+  - **NEW key auth**: headers `RELAYER_API_KEY` + `RELAYER_API_KEY_ADDRESS` — the
+    key created in the Polymarket web UI under **Settings > API Keys** (what the
+    operator has). Env: `POLY_RELAYER_API_KEY` / `POLY_RELAYER_API_KEY_ADDRESS`.
+  - **OLD HMAC builder auth**: signed `POLY_BUILDER_*` headers via
+    `py-builder-signing-sdk` (`BuilderConfig` + `BuilderApiKeyCreds`). Env:
+    `POLY_BUILDER_API_KEY` / `POLY_BUILDER_SECRET` / `POLY_BUILDER_PASSPHRASE`.
+  There is no keyless relayer POST access (GET endpoints like `/nonce`,
+  `/transaction` respond without auth).
+- Key-auth implementation note: `py-builder-relayer-client==0.0.2` is the LATEST
+  on PyPI (checked 2026-07-02) and is HMAC-only. Its auth headers are generated in
+  exactly one place — `RelayClient._post_request` → `_generate_builder_headers`
+  (GETs are sent unauthenticated). The module therefore subclasses `RelayClient`
+  (`_KeyAuthRelayClient` inside `_build_relay_client`): overrides `_post_request`
+  to attach the two key-auth headers and no-ops `assert_builder_creds_needed`;
+  ALL payload construction/signing (nonce/relay-payload fetch, proxy calldata
+  encoding, EOA signature, polling) is inherited unchanged. Revisit if a newer
+  client version adds native `relayerApiKey` support.
 - Wallet types: `RelayerTxType.PROXY` (sig type 1; wallet auto-deploys on first tx)
   and `RelayerTxType.SAFE` (sig type 2; must already be deployed — ours is).
 - Covered ops per docs: wallet deploy, approvals, **CTF split/merge/redeem**, transfers.
@@ -105,8 +121,34 @@ future migration to pUSD-collateralized conditions keeps working.
   with `POLY_RPC_URL`.
 - Env consumed by the module (names only, values never logged):
   `POLY_PRIVATE_KEY`, `POLY_FUNDER_ADDRESS`, `POLY_SIGNATURE_TYPE`,
-  `POLY_BUILDER_API_KEY`, `POLY_BUILDER_SECRET`, `POLY_BUILDER_PASSPHRASE`,
+  `POLY_RELAYER_API_KEY`, `POLY_RELAYER_API_KEY_ADDRESS` (new key auth),
+  `POLY_BUILDER_API_KEY`, `POLY_BUILDER_SECRET`, `POLY_BUILDER_PASSPHRASE` (HMAC),
   `POLY_RELAYER_URL`, `POLY_RPC_URL`.
+
+## Read-only self-check CLI (`--check`)
+
+```bash
+.venv/bin/python -m quoter.chain.positions_ops --check [0x<condition_id>]
+```
+
+Sends NO transactions, prints env var NAMES only (never values), loads `./.env`
+if present. One `PASS`/`FAIL` line per check, exit code 1 if any check failed:
+
+```
+PASS  env POLY_PRIVATE_KEY: present
+PASS  env POLY_FUNDER_ADDRESS: present
+PASS  relayer auth mode: key-auth (POLY_RELAYER_API_KEY + POLY_RELAYER_API_KEY_ADDRESS)
+PASS  relayer reachability (GET /nonce): HTTP 200, key-auth headers, nonce present
+PASS  collateral detection 0x…: detected USDC.e; units: USDC.e up=… down=…, pUSD up=0 down=0
+self-check complete — no transactions were sent
+```
+
+- *auth mode* shows which scheme resolves: `key-auth` > `hmac` > `none -> Path B`.
+- *reachability* derives the signer address from `POLY_PRIVATE_KEY` and GETs
+  `{relayer}/nonce?address=…&type=PROXY|SAFE` with the key-auth headers attached
+  when configured.
+- *collateral detection* (only with the optional condition-id arg) reads the
+  proxy's pair balances for both collateral candidates via `eth_call`.
 
 ## Gas requirements
 
@@ -120,7 +162,8 @@ future migration to pUSD-collateralized conditions keeps working.
 - Neg-risk markets are NOT supported (they need the NegRiskAdapter
   `0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296`); the 5m Up/Down markets are plain
   binary CTF conditions, so this is out of scope here.
-- Path A untested end-to-end (needs operator-created Relayer API key).
+- Path A untested end-to-end (submit-tx POST needs the operator's key; GET-side
+  reachability with the key-auth headers verified via `--check`).
 - Direct path for `POLY_SIGNATURE_TYPE=2` (Safe) intentionally unimplemented.
 - Functions are blocking (httpx/web3 sync) — call them off the quoting hot path
   (e.g. from the merge_runner sweeper via a thread executor).
@@ -131,18 +174,25 @@ Goal: one ~$1 pair merge on the live proxy wallet. Bounded loss: $0 (merge is
 value-neutral: burns 1 Up + 1 Down, credits $1.00 USDC.e).
 
 1. Pick the path:
-   - **Path A (preferred):** log into polymarket.com with the bot account →
-     Settings > API Keys → create a **Relayer API key**; put key/secret/passphrase
-     into the server `.env` as `POLY_BUILDER_API_KEY`, `POLY_BUILDER_SECRET`,
-     `POLY_BUILDER_PASSPHRASE`.
-   - **Path B:** leave those unset; send ~1-2 POL to the owner EOA address.
+   - **Path A, key auth (preferred — what the operator has):** log into
+     polymarket.com with the bot account → Settings > API Keys → create a
+     **Relayer API key**; put the key and its address into the server `.env` as
+     `POLY_RELAYER_API_KEY` and `POLY_RELAYER_API_KEY_ADDRESS`.
+   - **Path A, HMAC (legacy alternative):** set `POLY_BUILDER_API_KEY`,
+     `POLY_BUILDER_SECRET`, `POLY_BUILDER_PASSPHRASE` instead.
+   - **Path B:** leave all five unset; send ~1-2 POL to the owner EOA address.
 2. Obtain a matched pair: if the proxy already holds ≥1 share of BOTH sides of some
    condition, use it. Otherwise buy 1 share Up AND 1 share Down (~$1 total) in a
    current market via the UI. Note the market's `condition_id` (bot log,
    `state.db` `markets.market_id`, or gamma-api).
-3. Record the proxy's USDC.e balance before (Polymarket UI cash, or polygonscan
+3. Preflight (read-only, no transactions):
+   `.venv/bin/python -m quoter.chain.positions_ops --check 0x<condition_id>`
+   → expect all `PASS`: auth mode matching step 1 (`key-auth` for the preferred
+   path), relayer `HTTP 200, nonce present`, and the collateral line showing the
+   pair you are about to merge (`detected USDC.e; … up>0 down>0`).
+4. Record the proxy's USDC.e balance before (Polymarket UI cash, or polygonscan
    token balance of the funder address).
-4. On the server, from the repo root:
+5. On the server, from the repo root:
 
    ```bash
    .venv/bin/python -c "
@@ -151,21 +201,26 @@ value-neutral: burns 1 Up + 1 Down, credits $1.00 USDC.e).
    print(merge_pairs('0x<condition_id>', 1))"
    ```
 
-   Expected: `True`, with a `relayer_tx_done` (A) or `direct_tx_done` (B) log line
-   containing the tx hash.
-5. Verify: USDC.e balance +$1.00; both legs of the position gone (UI portfolio or
+   Expected: `True`, with a `relayer_auth_mode` line (`mode=key` or `mode=hmac`)
+   followed by `relayer_tx_done` (Path A) — or `direct_tx_done` (Path B) — a log
+   line containing the tx hash.
+6. Verify: USDC.e balance +$1.00; both legs of the position gone (UI portfolio or
    polygonscan ERC-1155). **Record the tx hash below.**
-6. Optional redeem check: after any market resolves while the proxy holds the
+7. Optional redeem check: after any market resolves while the proxy holds the
    winning side, run `redeem('0x<condition_id>')` → `True`, winnings credited.
 
 Acceptance record (fill on completion):
 
 - [ ] merge tx hash: `________________`
-- [ ] path used: A / B
+- [ ] path used: A-key / A-hmac / B
 - [ ] balance delta confirmed: `________`
 
 ## Status
 
-DONE_WITH_CONCERNS — implementation + read-only verification complete; the single
-$1 acceptance merge awaits operator authorization (and, for Path A, an operator-
-created Relayer API key).
+DONE_WITH_CONCERNS — implementation + read-only verification complete (incl.
+key-auth: `--check` against the live relayer returns HTTP 200 with the
+`RELAYER_API_KEY` headers attached); the single $1 acceptance merge awaits
+operator authorization with the operator's UI-created Relayer API key
+(`POLY_RELAYER_API_KEY` / `POLY_RELAYER_API_KEY_ADDRESS`). Key-auth POST
+`/submit` is NOT yet exercised end-to-end — that is exactly what the acceptance
+merge validates.
