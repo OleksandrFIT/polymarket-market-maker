@@ -106,6 +106,12 @@ class Config:
     band_lo: float = 0.62            # leader price band at minute 2 (inclusive)
     band_hi: float = 0.78
 
+    # ── phase-27 top-of-book MM strategy ──
+    tb_size: float = 5.0          # shares per quote per side
+    tb_naked_cap: float = 10.0    # stop quoting a side when inv[side]-inv[other] >= cap
+    tb_tick: float = 0.001        # price-improvement tick over best bid
+    tb_merge_min: float = 5.0     # merge matched pairs once min(inv) >= this
+
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle
     requote_on_mid_move_cents: int = 1
