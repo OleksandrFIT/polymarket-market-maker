@@ -1,14 +1,21 @@
 #!/bin/bash
-# Attended-live watchdog v2 — EQUITY-based (fix after the 2026-07-05 false stop:
-# v1 compared pUSD cash only, blind to merge returns in USDC.e and to position value,
-# so a normal trending window looked like a -$16 drawdown when reality was -$1.2).
-# equity = pUSD + USDC.e (on-chain) + $1 x matched pairs in open positions (naked counted
-# at $0 — conservative). Baseline = first reading (delete live_watch_base.txt to reset).
-# Breaches -> POST /api/force_stop: equity drawdown < -$10 | naked > 8 | merge_fails >= 2.
-# naked tripwire is cap (6) + 2-share slack for on-chain read lag; the hard skew gate
-# should hold naked <= 6, so a read > 8 means the gate failed -> stop.
+# Attended-live watchdog v3. Fixes the 2026-07-06 FALSE stop: v2 counted naked at $0 and
+# used a single-read equity-dd, so during active trading ($15 cash committed to not-yet-
+# indexed / naked shares) the reading dipped to ~-$10 and force-stopped a window that was
+# actually +$1.25. v3:
+#   - equity = pUSD + USDC.e (on-chain) + MARKET value of ALL positions (size x curPrice):
+#     matched pairs ~= $1, naked valued at its price (not $0) -> no static undercount.
+#   - equity-dd breach must PERSIST 2 consecutive reads before force_stop (kills a transient
+#     data-api positions lag dip; a real loss persists).
+#   - merge_fails counted from the watchdog's OWN start (delta), not the whole historical log.
+# naked>8 (instant; local count from the bot, reliable) and merge_fails>=2 still fire at once.
+# Baseline = first reading (delete live_watch_base.txt to reset).
 LIMIT=-10.0
+DD_NEEDED=2                                   # consecutive equity-dd breaches before stop
 BASE_F=/home/ubuntu/live_watch_base.txt
+LOG=/home/ubuntu/poly-quoter/logs/control.log
+MF_BASE=$(grep -c merge_failed "$LOG" 2>/dev/null || echo 0)   # merges failed BEFORE we started
+DD_COUNT=0
 while true; do
   EQ=$(/home/ubuntu/poly-quoter/.venv/bin/python - << 'PYEOF'
 import os, json, urllib.request
@@ -27,34 +34,40 @@ def bal(token):
     return int(r["result"], 16) / 1e6
 pusd = bal("0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB")
 usdce = bal("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
-pairs_val = 0.0
+pos_val = 0.0   # MARKET value of every position: pairs ~= $1, naked at its price (not $0)
 try:
     pos = json.load(urllib.request.urlopen(urllib.request.Request(
-        "https://data-api.polymarket.com/positions?user=%s&sizeThreshold=0.5&limit=100" % proxy,
+        "https://data-api.polymarket.com/positions?user=%s&sizeThreshold=0.3&limit=100" % proxy,
         headers={"User-Agent": "Mozilla/5.0"}), timeout=15))
-    byslug = {}
     for p in pos:
-        d = byslug.setdefault(p.get("slug", "?"), {})
-        d[p.get("outcome", "?")] = float(p.get("size", 0))
-    for d in byslug.values():
-        pairs_val += min(d.get("Up", 0.0), d.get("Down", 0.0))   # $1 per matched pair
+        pos_val += float(p.get("size", 0) or 0) * float(p.get("curPrice") or 0)
+    # print ONLY inside the try: if the positions fetch/parse failed we must NOT publish an
+    # equity that omits every position (=$15-committed false dip) — an empty print makes the
+    # bash `[ -z "$EQ" ]` guard SKIP the read, so a data-api outage can't false-stop.
+    print("%.2f %.2f %.2f %.2f" % (pusd, usdce, pos_val, pusd + usdce + pos_val))
 except Exception:
     pass
-print("%.2f %.2f %.2f %.2f" % (pusd, usdce, pairs_val, pusd + usdce + pairs_val))
 PYEOF
 )
   if [ -z "$EQ" ]; then echo "$(date -u +%T) NO-EQUITY-READ"; sleep 10; continue; fi
-  read -r PUSD USDCE PAIRS TOTAL <<< "$EQ"
+  read -r PUSD USDCE POSVAL TOTAL <<< "$EQ"
   [ -f "$BASE_F" ] || echo "$TOTAL" > "$BASE_F"
   BASE=$(cat "$BASE_F")
   DD=$(python3 -c "print(round($TOTAL-$BASE,2))")
   S=$(curl -s -m4 http://127.0.0.1:8080/api/status)
   MODE=$(echo "$S" | python3 -c "import sys,json;print(json.load(sys.stdin).get('mode'))" 2>/dev/null)
   NAKED=$(echo "$S" | python3 -c "import sys,json;print(int(json.load(sys.stdin).get('naked_shares') or 0))" 2>/dev/null)
-  MF=$(grep -c merge_failed /home/ubuntu/poly-quoter/logs/control.log 2>/dev/null)
-  echo "$(date -u +%T) mode=$MODE equity=$TOTAL (pUSD=$PUSD usdce=$USDCE pairs=\$$PAIRS) dd=$DD naked=$NAKED merge_fails=$MF"
+  MF_NOW=$(grep -c merge_failed "$LOG" 2>/dev/null || echo 0)
+  MF=$((MF_NOW - MF_BASE))                      # merges failed SINCE we started
+  # equity-dd debounce: count consecutive breaches, reset on any healthy read
+  if python3 -c "exit(0 if float('$DD') < $LIMIT else 1)"; then
+    DD_COUNT=$((DD_COUNT + 1))
+  else
+    DD_COUNT=0
+  fi
+  echo "$(date -u +%T) mode=$MODE equity=$TOTAL (pUSD=$PUSD usdce=$USDCE posval=\$$POSVAL) dd=$DD (x$DD_COUNT) naked=$NAKED merge_fails=$MF"
   BREACH=""
-  python3 -c "exit(0 if float('$DD') < $LIMIT else 1)" && BREACH="equity dd<$LIMIT"
+  [ "$DD_COUNT" -ge "$DD_NEEDED" ] && BREACH="equity dd<$LIMIT x$DD_COUNT"
   [ "${NAKED:-0}" -gt 8 ] 2>/dev/null && BREACH="naked>8"
   [ "${MF:-0}" -ge 2 ] 2>/dev/null && BREACH="merge_failed x$MF"
   if [ -n "$BREACH" ] && [ "$MODE" = "RUNNING" ]; then
