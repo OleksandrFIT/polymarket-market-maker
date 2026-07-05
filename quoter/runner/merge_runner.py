@@ -856,7 +856,9 @@ class MergeRunner:
         self.state.matched_pct = 0.0
         log.info("topbook_enter", slug=m.slug, mid=round(mid_at_entry, 3))
         inv = {"Up": 0.0, "Down": 0.0}     # filled (credit-on-vanish + partial credit)
-        cost = {"Up": 0.0, "Down": 0.0}    # realized cost basis — NEVER decremented
+        cost = {"Up": 0.0, "Down": 0.0}    # realized cost basis — NEVER decremented (committed cap)
+        held_cost = {"Up": 0.0, "Down": 0.0}   # cost of shares STILL held — decremented on merge
+        tb_completed: dict[str, list[tuple[float, float]]] = {"Up": [], "Down": []}  # (t, qty) completes
         resting: dict[str, tuple[float, float]] = {}   # side -> (price, size)
         oids: dict[str, list[str]] = {"Up": [], "Down": []}
         merged = 0.0
@@ -891,6 +893,7 @@ class MergeRunner:
                                 if matched:
                                     inv[side] += matched
                                     cost[side] += matched * p
+                                    held_cost[side] += matched * p
                                     log.info("topbook_partial_fill", side=side, price=p,
                                              matched=matched)
                             await self._cancel_orders(oids.get(side, []))
@@ -945,15 +948,68 @@ class MergeRunner:
                                     if matched > 0:
                                         inv[side] += matched
                                         cost[side] += matched * p
+                                        held_cost[side] += matched * p
                                         log.info("topbook_fill", side=side, price=p,
                                                  size=matched)
-                        # merge matched pairs (cost basis intentionally NOT reduced)
-                        mq = plan_merge(inv["Up"], inv["Down"], self.cfg.tb_merge_min)
+                        # NEAR-END PAIR COMPLETION: buy the light leg (taker FOK) to close a
+                        # naked pair so nothing rides to resolution as a directional coin-flip.
+                        # Only when the completed pair costs < $1 (guaranteed profit, using the
+                        # HELD avg — held_cost/inv, correct across merges unlike cumulative cost);
+                        # else the small residual rides (no risky SELL in v1). Balance-only +
+                        # lag-safe + $ budget bound. Live only (dry_run does no taker buys).
+                        near_end = m.time_remaining() <= self.cfg.tb_complete_gate_sec
+                        if self.cfg.tb_complete and not self.cfg.dry_run and near_end:
+                            naked = inv["Up"] - inv["Down"]
+                            if naked != 0:
+                                light = "Down" if naked > 0 else "Up"
+                                heavy = "Up" if naked > 0 else "Down"
+                                heavy_avg = (held_cost[heavy] / inv[heavy]
+                                             if inv[heavy] > 0 else None)
+                                light_ask = _best(bn if light == "Down" else by, "asks")
+                                now = monotonic()
+                                # balance-only (light never exceeds heavy) minus completes
+                                # still inside the feed-lag window (inv may not yet reflect
+                                # them). A CUMULATIVE total would wrongly suppress genuinely-
+                                # new naked later in the window (once a completed pair merges
+                                # out, its qty must stop offsetting) — so track timestamped.
+                                recent = recent_complete_qty(tb_completed[light], now,
+                                                             self.cfg.inv_reconcile_grace_sec)
+                                qty = balance_complete_qty(abs(naked), recent)
+                                budget_left = self.cfg.per_window_cap - (cost["Up"] + cost["Down"])
+                                if light_ask and light_ask > 0:
+                                    qty = min(qty, budget_left / light_ask)
+                                qty = float(int(qty))
+                                if (qty >= 1 and light_ask and heavy_avg is not None
+                                        and (heavy_avg + light_ask) < 1.0):
+                                    r = await self._place_limit(
+                                        token_id=tok[light], price=light_ask, size=qty,
+                                        side="BUY", post_only=False, order_type="FOK")
+                                    # FOK is all-or-nothing: credit ONLY the real matched size.
+                                    # A killed FOK still returns success+order_id, so crediting
+                                    # `qty` would phantom-close a naked leg that actually rides
+                                    # to resolution (invisible loss). None (lookup failed) ->
+                                    # credit 0: never assume a fill we can't confirm.
+                                    filled = (self._order_matched(r["order_id"])
+                                              if (r and r.get("order_id")) else None)
+                                    if filled:
+                                        inv[light] += filled
+                                        cost[light] += filled * light_ask
+                                        held_cost[light] += filled * light_ask
+                                        tb_completed[light].append((now, filled))
+                                        log.info("topbook_complete", side=light, qty=filled,
+                                                 price=round(light_ask, 3))
+                        # merge matched pairs (committed `cost` NOT reduced; held_cost IS, to
+                        # keep per-share avg correct). Near-end merge ANY complete pair (min 1)
+                        # so a just-completed sub-tb_merge_min pair doesn't ride unmerged.
+                        merge_min = 1.0 if (self.cfg.tb_complete and near_end) else self.cfg.tb_merge_min
+                        mq = plan_merge(inv["Up"], inv["Down"], merge_min)
                         if mq > 0:
                             ok = await self._merge_pairs(m, mq)   # dry_run -> logs intent, True
                             if ok:
-                                inv["Up"] -= mq
-                                inv["Down"] -= mq
+                                for s in ("Up", "Down"):
+                                    avg_s = held_cost[s] / inv[s] if inv[s] > 0 else 0.0
+                                    held_cost[s] = max(0.0, held_cost[s] - mq * avg_s)
+                                    inv[s] -= mq
                                 merged += mq
                                 self.state.merged_today += mq
                         self.state.pairs_caught = int(min(inv["Up"], inv["Down"]))
