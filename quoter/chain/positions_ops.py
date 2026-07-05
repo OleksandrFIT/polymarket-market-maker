@@ -294,6 +294,21 @@ def usdce_balance() -> float | None:
         return None
 
 
+def wrap_decision(bal: float | None, min_usd: float) -> tuple[bool, str]:
+    """The sweeper's wrap gate as a pure function — (do_wrap, reason).
+
+    Reason is logged when do_wrap is False so a skipped wrap is never silent: the
+    2026-07-05 stranded $25 left NO trace of why (a None balance or a below-min read
+    both just fell through). `bal is None` (RPC read failed) and `bal <= min_usd`
+    (nothing worth wrapping) are the two skips; strictly above min -> wrap.
+    """
+    if bal is None:
+        return False, "balance_unknown"
+    if bal <= min_usd:
+        return False, "below_min"
+    return True, "wrap"
+
+
 def _payout_denominator(condition_id: str) -> int:
     raw = _eth_call(
         CTF_ADDRESS,
@@ -693,15 +708,63 @@ def _run_check(condition_id: str | None) -> int:
     return exit_code
 
 
+def _run_wrap(amount: float | None, confirm: bool) -> int:
+    """Operator-invoked one-off wrap of stranded USDC.e -> pUSD (1:1, gasless relayer).
+
+    The ONLY tx-sending path in this CLI. Recovers USDC.e that the live sweeper never
+    got to convert (short/force-stopped windows leave it stranded; the bot can't wrap
+    while locked in dry-run). PREVIEW unless --yes: prints the balance and the amount
+    it WOULD wrap and sends nothing. Refuses when the balance read fails or the
+    requested amount exceeds the on-chain balance (wrap_usdce_to_pusd also re-checks).
+    """
+    try:  # pick up the operator/server .env like the runbooks do
+        from dotenv import load_dotenv
+
+        load_dotenv(".env")
+    except ImportError:
+        pass
+
+    bal = usdce_balance()  # never raises; None = read failed
+    if bal is None:
+        print("FAIL  USDC.e balance read failed — aborting (no tx sent)")
+        return 1
+    amt = bal if amount is None else amount
+    if amt <= 0:
+        print(f"nothing to wrap (USDC.e ${bal:.2f}, requested ${amt:.2f})")
+        return 1
+    if amt > bal + 1e-9:
+        print(f"FAIL  requested ${amt:.2f} > USDC.e balance ${bal:.2f} — aborting")
+        return 1
+    print(f"USDC.e balance ${bal:.2f}; wrap ${amt:.2f} -> pUSD (1:1, gasless relayer)")
+    if not confirm:
+        print("preview only — re-run with --yes to send the transaction")
+        return 0
+    ok = wrap_usdce_to_pusd(amt)
+    print("PASS  wrap sent OK" if ok else "FAIL  wrap failed (see wrap_usdce_to_pusd_error log)")
+    return 0 if ok else 1
+
+
 def _main(argv: list[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
         prog="python -m quoter.chain.positions_ops",
-        description="Read-only self-check for the positions-ops relayer/chain setup. "
-        "Never sends transactions; never prints env values.",
+        description="positions-ops relayer/chain CLI. --check is read-only; --wrap is the "
+        "one exception (sends a wrap tx, and only with --yes). Never prints env values.",
     )
     parser.add_argument("--check", action="store_true", help="run the read-only self-check")
+    parser.add_argument(
+        "--wrap", action="store_true",
+        help="one-off wrap stranded USDC.e -> pUSD (PREVIEW unless --yes)",
+    )
+    parser.add_argument(
+        "--amount", type=float, default=None,
+        help="USDC.e amount to wrap with --wrap (default: full on-chain balance)",
+    )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help="with --wrap: actually send the tx (omit for a dry preview)",
+    )
     parser.add_argument(
         "condition_id",
         nargs="?",
@@ -709,8 +772,10 @@ def _main(argv: list[str] | None = None) -> int:
         help="optional condition id (0x…, 32 bytes) for collateral detection",
     )
     args = parser.parse_args(argv)
+    if args.wrap:
+        return _run_wrap(args.amount, args.yes)
     if not args.check:
-        parser.error("nothing to do: pass --check (this CLI is read-only by design)")
+        parser.error("nothing to do: pass --check (read-only) or --wrap (see --help)")
     return _run_check(args.condition_id)
 
 

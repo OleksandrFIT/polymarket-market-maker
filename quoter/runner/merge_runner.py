@@ -968,11 +968,18 @@ class MergeRunner:
                             # not share count — the metric is USD recovered.
                             self.state.redeemed_today += float(p.get("currentValue", 0) or 0)
                 if not self.cfg.dry_run:
-                    from quoter.chain.positions_ops import usdce_balance, wrap_usdce_to_pusd
-                    bal = usdce_balance()  # read-only; None = unknown -> skip
-                    if bal is not None and bal > WRAP_MIN_USD:
+                    from quoter.chain.positions_ops import (
+                        usdce_balance, wrap_usdce_to_pusd, wrap_decision)
+                    bal = usdce_balance()  # read-only; None = unknown
+                    do_wrap, reason = wrap_decision(bal, WRAP_MIN_USD)
+                    if do_wrap:
                         ok = wrap_usdce_to_pusd(bal)
                         log.info("wrap_result", usdce=round(bal, 2), ok=ok)
+                    else:
+                        # never silent: a stranded balance now leaves a trace of WHY
+                        # (balance_unknown = RPC read failed; below_min = nothing to do)
+                        log.info("wrap_skip", reason=reason,
+                                 usdce=(round(bal, 2) if bal is not None else None))
             except Exception as e:
                 log.warning("redeem_sweeper_err", error=str(e))
             await asyncio.sleep(60)

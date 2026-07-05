@@ -130,3 +130,58 @@ def test_usdce_balance_none_on_rpc_error(monkeypatch):
 
     monkeypatch.setattr(po, "_erc20_balance_units", boom)
     assert po.usdce_balance() is None
+
+
+# ── wrap_decision: the sweeper's gate as a pure, loggable function ──
+
+
+def test_wrap_decision_reasons():
+    # None balance -> never wrap, distinct reason (was silently skipped, stranding $25)
+    assert po.wrap_decision(None, 5.0) == (False, "balance_unknown")
+    # boundary: exactly at min is NOT > min -> below_min (matches old `bal > WRAP_MIN`)
+    assert po.wrap_decision(5.0, 5.0) == (False, "below_min")
+    assert po.wrap_decision(4.99, 5.0) == (False, "below_min")
+    # strictly above min -> wrap
+    assert po.wrap_decision(25.0, 5.0) == (True, "wrap")
+
+
+# ── one-off wrap CLI (the ONLY tx-sending path; preview unless --yes) ──
+
+
+def _wrap_must_not_run(amount):  # pragma: no cover - failing guard
+    raise AssertionError("wrap_usdce_to_pusd must not be called")
+
+
+def test_cli_wrap_preview_sends_nothing(monkeypatch, capsys):
+    monkeypatch.setattr(po, "usdce_balance", lambda: 25.0)
+    monkeypatch.setattr(po, "wrap_usdce_to_pusd", _wrap_must_not_run)
+    assert po._main(["--wrap"]) == 0                 # preview, no --yes
+    assert "preview only" in capsys.readouterr().out
+
+
+def test_cli_wrap_yes_executes_full_balance(monkeypatch):
+    monkeypatch.setattr(po, "usdce_balance", lambda: 25.0)
+    seen: list[float] = []
+    monkeypatch.setattr(po, "wrap_usdce_to_pusd", lambda amt: seen.append(amt) or True)
+    assert po._main(["--wrap", "--yes"]) == 0
+    assert seen == [25.0]                            # default = full balance
+
+
+def test_cli_wrap_amount_respected(monkeypatch):
+    monkeypatch.setattr(po, "usdce_balance", lambda: 25.0)
+    seen: list[float] = []
+    monkeypatch.setattr(po, "wrap_usdce_to_pusd", lambda amt: seen.append(amt) or True)
+    assert po._main(["--wrap", "--amount", "10", "--yes"]) == 0
+    assert seen == [10.0]
+
+
+def test_cli_wrap_rejects_amount_over_balance(monkeypatch):
+    monkeypatch.setattr(po, "usdce_balance", lambda: 5.0)
+    monkeypatch.setattr(po, "wrap_usdce_to_pusd", _wrap_must_not_run)
+    assert po._main(["--wrap", "--amount", "10", "--yes"]) == 1   # refuse, no tx
+
+
+def test_cli_wrap_aborts_on_balance_read_fail(monkeypatch):
+    monkeypatch.setattr(po, "usdce_balance", lambda: None)
+    monkeypatch.setattr(po, "wrap_usdce_to_pusd", _wrap_must_not_run)
+    assert po._main(["--wrap", "--yes"]) == 1
