@@ -1,4 +1,5 @@
-"""On-chain position ops for the proxy wallet: merge matched pairs -> collateral, redeem resolved.
+"""On-chain position ops for the proxy wallet: merge matched pairs -> collateral,
+redeem resolved, wrap stranded USDC.e -> pUSD (trading balance).
 
 Chosen path documented in docs/superpowers/specs/2026-07-02-positions-ops-spike-notes.md.
 
@@ -33,11 +34,15 @@ Env consumed (names only — values are NEVER logged by this module):
 Self-check (read-only, NO transactions):
     python -m quoter.chain.positions_ops --check [condition_id]
 
-Contract addresses (verified on polygonscan 2026-07-02, see spike notes):
+Contract addresses (verified on polygonscan 2026-07-02 + on-chain probes 2026-07-05,
+see spike notes):
     ConditionalTokens  0x4D97DCd97eC945f40cF65F87097ACe5EA0476045
     pUSD (v2 collat.)  0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB
     USDC.e (legacy)    0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
     ProxyWalletFactory 0xaB45c5A4B0c941a2F231C04C3f49182e1A254052
+    pUSD wrapper       0x93070a847efEf7F70739046A929D47a521F5B8ee  (permissionless
+                       ``wrap(address token, address to, uint256 amount)``; holds the
+                       wrapper role on pUSD — pUSD.wrap itself is role-gated)
 
 Collateral is auto-detected per condition (USDC.e first, then pUSD) by reading the
 proxy's ERC-1155 pair balances — position ids depend on the collateral token, so
@@ -45,8 +50,10 @@ passing the wrong one would revert. Verified 2026-07-02: live 5m market CLOB tok
 ids equal the USDC.e-derived CTF position ids.
 
 NEVER places orders. ``merge_pairs`` never burns more than the passed qty and
-refuses when the wallet holds less. No token approvals are made (merge/redeem
-burn the caller's own ERC-1155 balance — no approval needed).
+refuses when the wallet holds less. Merge/redeem make no token approvals (they
+burn the caller's own ERC-1155 balance). ``wrap_usdce_to_pusd`` approves the
+pUSD wrapper for EXACTLY the wrapped amount in the same batched proxy tx and
+refuses when the proxy's USDC.e balance is below the requested amount.
 
 Import-safe without web3: web3 and the relayer client are imported lazily inside
 the functions that need them. Read-only chain queries use eth_abi + httpx only
@@ -72,6 +79,12 @@ CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 PROXY_WALLET_FACTORY = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
+# Permissionless USDC.e->pUSD wrapper (holds wrapper role 2 on pUSD; verified
+# on-chain 2026-07-05: eth_call wrap(USDC.e, to, 0) from an arbitrary address
+# succeeds, while pUSD.wrap directly reverts Unauthorized (0x82b42900) for
+# non-wrappers). Live sample: proxy wallets call wrap(USDC.e, self, amount) —
+# tx 0xacd202c41698720d3e489994eb89528d5b4c809fbf530c3c3eeef072c111e3ec.
+PUSD_WRAPPER_ADDRESS = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
 
 DEFAULT_RELAYER_URL = "https://relayer-v2.polymarket.com"
 # polygon-rpc.com now 401s without an API key; drpc is what Polymarket's own
@@ -176,11 +189,31 @@ def encode_redeem(collateral: str, condition_id: str) -> bytes:
     )
 
 
-def _encode_factory_proxy_call(inner_calldata: bytes) -> bytes:
-    """calldata for ProxyWalletFactory.proxy([(Call=1, CTF, 0, inner)]) — Path B, sig type 1."""
+def encode_erc20_approve(spender: str, amount_units: int) -> bytes:
+    """calldata for ERC20.approve(spender, amount)."""
+    return _selector("approve(address,uint256)") + abi_encode(
+        ["address", "uint256"], [to_checksum_address(spender), amount_units]
+    )
+
+
+def encode_wrap(token: str, to: str, amount_units: int) -> bytes:
+    """calldata for PUSD_WRAPPER.wrap(token, to, amount) — selector 0x62355638.
+
+    The wrapper transferFrom's ``amount`` of ``token`` (USDC.e) from the caller
+    into the pUSD contract, which mints pUSD 1:1 to ``to`` and forwards the
+    USDC.e to the Polymarket vault (verified live 2026-07-05, see spike notes).
+    """
+    return _selector("wrap(address,address,uint256)") + abi_encode(
+        ["address", "address", "uint256"],
+        [to_checksum_address(token), to_checksum_address(to), amount_units],
+    )
+
+
+def _encode_factory_proxy_call(calls: list[tuple[str, bytes]]) -> bytes:
+    """calldata for ProxyWalletFactory.proxy([(Call=1, to, 0, data), ...]) — Path B, sig type 1."""
     return _selector("proxy((uint8,address,uint256,bytes)[])") + abi_encode(
         ["(uint8,address,uint256,bytes)[]"],
-        [[(1, to_checksum_address(CTF_ADDRESS), 0, inner_calldata)]],
+        [[(1, to_checksum_address(to), 0, data) for to, data in calls]],
     )
 
 
@@ -235,6 +268,30 @@ def _pair_balances(owner: str, collateral: str, condition_id: str) -> tuple[int,
         _balance_of(owner, _position_id(collateral, condition_id, 1)),
         _balance_of(owner, _position_id(collateral, condition_id, 2)),
     )
+
+
+def _erc20_balance_units(token: str, owner: str) -> int:
+    raw = _eth_call(
+        token, _selector("balanceOf(address)") + abi_encode(["address"], [to_checksum_address(owner)])
+    )
+    return int(abi_decode(["uint256"], raw)[0])
+
+
+def usdce_balance() -> float | None:
+    """Proxy wallet's on-chain USDC.e balance in dollars (read-only eth_call).
+
+    Returns None when POLY_FUNDER_ADDRESS is unset or the RPC read fails —
+    callers treat None as \"unknown, do nothing\". Never raises.
+    """
+    try:
+        proxy = _proxy_address()
+        if proxy is None:
+            return None
+        # float(): mypy types `int ** <int var>` as Any, tainting the division
+        return float(_erc20_balance_units(USDCE_ADDRESS, proxy) / 10**COLLATERAL_DECIMALS)
+    except Exception:
+        log.exception("usdce_balance_error")
+        return None
 
 
 def _payout_denominator(condition_id: str) -> int:
@@ -331,10 +388,11 @@ def _build_relay_client(tx_type: object) -> Any:
     )
 
 
-def _execute_via_relayer(calldata: bytes) -> bool:
-    """Execute ``calldata`` against the CTF as the proxy wallet via the Polymarket
-    relayer (gasless). Requires POLY_PRIVATE_KEY + one relayer auth scheme
-    (key auth preferred, HMAC fallback — see ``_build_relay_client``)."""
+def _execute_via_relayer(calls: list[tuple[str, bytes]]) -> bool:
+    """Execute ``calls`` (a batch of ``(to, calldata)``) AS the proxy wallet via
+    the Polymarket relayer (gasless), in ONE proxy transaction. Requires
+    POLY_PRIVATE_KEY + one relayer auth scheme (key auth preferred, HMAC
+    fallback — see ``_build_relay_client``)."""
     from py_builder_relayer_client.models import (  # type: ignore[import-untyped]
         RelayerTxType,  # lazy: optional dep
         Transaction,
@@ -351,7 +409,10 @@ def _execute_via_relayer(calldata: bytes) -> bool:
 
     client = _build_relay_client(tx_type)
     resp = client.execute(
-        [Transaction(to=to_checksum_address(CTF_ADDRESS), data="0x" + calldata.hex(), value="0")],
+        [
+            Transaction(to=to_checksum_address(to), data="0x" + data.hex(), value="0")
+            for to, data in calls
+        ],
         metadata="poly-quoter positions_ops",
     )
     mined = resp.wait()  # polls until MINED/CONFIRMED, None on FAILED/timeout
@@ -367,54 +428,60 @@ def _execute_via_relayer(calldata: bytes) -> bool:
 # ── Execution: Path B (direct on-chain, EOA pays POL gas) ──
 
 
-def _execute_direct(calldata: bytes) -> bool:
-    """EOA sends the tx itself. sig type 1 -> factory.proxy(...); 0 -> CTF directly."""
+def _execute_direct(calls: list[tuple[str, bytes]]) -> bool:
+    """EOA sends the tx itself. sig type 1 -> ONE factory.proxy(calls) batch tx;
+    0 -> the EOA is the wallet, so each call is its own sequential tx."""
     from web3 import Web3  # lazy: module stays importable without web3
 
     sig_type = _sig_type()
     if sig_type == 1:
-        to, data = PROXY_WALLET_FACTORY, _encode_factory_proxy_call(calldata)
+        txs = [(PROXY_WALLET_FACTORY, _encode_factory_proxy_call(calls))]
     elif sig_type == 0:
-        to, data = CTF_ADDRESS, calldata
+        txs = calls
     else:
         log.warning("direct_path_unsupported_sig_type", sig_type=sig_type, hint="use relayer")
         return False
 
     w3 = Web3(Web3.HTTPProvider(_rpc_url(), request_kwargs={"timeout": _RPC_TIMEOUT_S}))
     acct = w3.eth.account.from_key(os.environ["POLY_PRIVATE_KEY"].strip())
-    tx: dict[str, object] = {  # loosely typed; web3 TxParams is a TypedDict
-        "chainId": CHAIN_ID,
-        "from": acct.address,
-        "to": to_checksum_address(to),
-        "value": 0,
-        "data": data,
-        "nonce": w3.eth.get_transaction_count(acct.address),
-    }
-    tx["gas"] = int(w3.eth.estimate_gas(tx) * 1.2)  # type: ignore[arg-type]
-    base_fee = w3.eth.get_block("latest").get("baseFeePerGas", 0)
-    tip = max(w3.eth.max_priority_fee, w3.to_wei(30, "gwei"))  # polygon floor ~25-30 gwei
-    tx["maxPriorityFeePerGas"] = tip
-    tx["maxFeePerGas"] = base_fee * 2 + tip
-    signed = acct.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=_RECEIPT_TIMEOUT_S)
-    ok = receipt["status"] == 1
-    log.info("direct_tx_done" if ok else "direct_tx_reverted", tx_hash=tx_hash.hex())
-    return ok
+    for to, data in txs:
+        tx: dict[str, object] = {  # loosely typed; web3 TxParams is a TypedDict
+            "chainId": CHAIN_ID,
+            "from": acct.address,
+            "to": to_checksum_address(to),
+            "value": 0,
+            "data": data,
+            "nonce": w3.eth.get_transaction_count(acct.address),
+        }
+        tx["gas"] = int(w3.eth.estimate_gas(tx) * 1.2)  # type: ignore[arg-type]
+        base_fee = w3.eth.get_block("latest").get("baseFeePerGas", 0)
+        tip = max(w3.eth.max_priority_fee, w3.to_wei(30, "gwei"))  # polygon floor ~25-30 gwei
+        tx["maxPriorityFeePerGas"] = tip
+        tx["maxFeePerGas"] = base_fee * 2 + tip
+        signed = acct.sign_transaction(tx)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=_RECEIPT_TIMEOUT_S)
+        ok = receipt["status"] == 1
+        log.info("direct_tx_done" if ok else "direct_tx_reverted", tx_hash=tx_hash.hex())
+        if not ok:
+            return False
+    return True
 
 
-def _execute(calldata: bytes) -> bool:
+def _execute(calls: list[tuple[str, bytes]]) -> bool:
     """Route: relayer key-auth > relayer HMAC > direct on-chain (web3).
 
-    Path A (gasless relayer) is taken when EITHER auth scheme is configured;
-    inside it, key auth wins over HMAC (see ``_build_relay_client``).
+    ``calls`` is a list of ``(to, calldata)`` executed AS the proxy wallet — one
+    batched proxy tx on the relayer / factory paths. Path A (gasless relayer) is
+    taken when EITHER auth scheme is configured; inside it, key auth wins over
+    HMAC (see ``_build_relay_client``).
     """
     if not os.environ.get("POLY_PRIVATE_KEY", "").strip():
         log.error("positions_ops_missing_private_key_env")
         return False
     if _relayer_key_auth_present() or _relayer_creds_present():
-        return _execute_via_relayer(calldata)
-    return _execute_direct(calldata)
+        return _execute_via_relayer(calls)
+    return _execute_direct(calls)
 
 
 # ── Public API ──
@@ -439,7 +506,7 @@ def merge_pairs(condition_id: str, qty: float) -> bool:
         if collateral is None:
             log.warning("merge_insufficient_pair", condition_id=condition_id, qty=qty)
             return False
-        ok = _execute(encode_merge(collateral, condition_id, units))
+        ok = _execute([(CTF_ADDRESS, encode_merge(collateral, condition_id, units))])
         log.info("merge_pairs_result", condition_id=condition_id, qty=qty, ok=ok)
         return ok
     except Exception:
@@ -465,11 +532,55 @@ def redeem(condition_id: str) -> bool:
         if collateral is None:
             log.info("redeem_skip_no_position", condition_id=condition_id)
             return False
-        ok = _execute(encode_redeem(collateral, condition_id))
+        ok = _execute([(CTF_ADDRESS, encode_redeem(collateral, condition_id))])
         log.info("redeem_result", condition_id=condition_id, ok=ok)
         return ok
     except Exception:
         log.exception("redeem_error", condition_id=condition_id)
+        return False
+
+
+def wrap_usdce_to_pusd(amount: float) -> bool:
+    """Convert ``amount`` USDC.e held by the PROXY wallet into pUSD 1:1 (the CLOB
+    trading balance) — merge/redeem return USDC.e, but orders buy with pUSD.
+
+    Mechanism (verified on-chain 2026-07-05, see spike notes): ``pUSD.wrap`` is
+    role-gated to registered wrapper contracts, so the public path is the
+    permissionless wrapper ``PUSD_WRAPPER_ADDRESS`` —
+    ``wrap(USDC.e, recipient, amount)`` transferFrom's the caller's USDC.e into
+    the pUSD contract, which mints pUSD 1:1 to ``recipient`` and forwards the
+    USDC.e to the Polymarket vault. Executed AS the proxy via the same relayer
+    transport as merge/redeem, as ONE batched proxy tx:
+    ``[USDC.e.approve(wrapper, amount), wrapper.wrap(USDC.e, proxy, amount)]``
+    (exact-amount approval — no standing allowance is left behind).
+
+    Refuses (returns False) when the proxy's on-chain USDC.e balance is below
+    ``amount``. Blocking (network I/O) — call off the hot path.
+    """
+    try:
+        units = int(round(amount * 10**COLLATERAL_DECIMALS))
+        if units <= 0:
+            log.warning("wrap_skip_nonpositive_amount", amount=amount)
+            return False
+        proxy = _proxy_address()
+        if proxy is None:
+            log.error("wrap_missing_funder_env")
+            return False
+        held = _erc20_balance_units(USDCE_ADDRESS, proxy)
+        if held < units:
+            log.warning("wrap_insufficient_usdce", amount=amount,
+                        held=held / 10**COLLATERAL_DECIMALS)
+            return False
+        ok = _execute(
+            [
+                (USDCE_ADDRESS, encode_erc20_approve(PUSD_WRAPPER_ADDRESS, units)),
+                (PUSD_WRAPPER_ADDRESS, encode_wrap(USDCE_ADDRESS, proxy, units)),
+            ]
+        )
+        log.info("wrap_usdce_to_pusd_result", amount=amount, ok=ok)
+        return ok
+    except Exception:
+        log.exception("wrap_usdce_to_pusd_error", amount=amount)
         return False
 
 
@@ -520,6 +631,16 @@ def _check_collateral(condition_id: str) -> tuple[bool, str]:
     return True, f"{verdict}; units: {', '.join(parts)}"
 
 
+def _check_usdce_balance() -> tuple[bool, str]:
+    """Proxy's on-chain USDC.e balance — what the wrap sweeper would convert."""
+    if _proxy_address() is None:
+        return False, "skipped (POLY_FUNDER_ADDRESS missing)"
+    bal = usdce_balance()  # never raises
+    if bal is None:
+        return False, "read failed"
+    return True, f"${bal:.2f}"
+
+
 def _run_check(condition_id: str | None) -> int:
     """Run all read-only checks, print PASS/FAIL lines. NEVER sends a transaction.
 
@@ -557,6 +678,9 @@ def _run_check(condition_id: str | None) -> int:
     except Exception as exc:  # network/parse errors must not print secrets
         ok, detail = False, f"error ({type(exc).__name__})"
     line("relayer reachability (GET /nonce)", ok, detail)
+
+    ok, detail = _check_usdce_balance()
+    line("proxy USDC.e balance (wrap candidate)", ok, detail)
 
     if condition_id is not None:
         try:

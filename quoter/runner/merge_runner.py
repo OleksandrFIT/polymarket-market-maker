@@ -49,6 +49,7 @@ END_BUFFER_SEC = 12   # stop polling / cancel unfilled this many sec before expi
 POLL_SEC = 8
 LOOP_SEC = 6
 REQUOTE_SEC = 2       # re-quote cadence (read book + adjust orders this often)
+WRAP_MIN_USD = 5.0    # sweep USDC.e -> pUSD only above this (skip dust; 1 tx/pass max)
 
 
 def _best(book: dict, side: str) -> float | None:
@@ -935,8 +936,11 @@ class MergeRunner:
                  spent=round(cost["Up"] + cost["Down"], 2), committed=round(committed, 2))
 
     async def _redeem_sweeper(self) -> None:
-        """Every 60s: redeem resolved positions so capital returns to cash. Dry-run: log only.
-        Isolated loop — its failure never stops quoting (every pass is fully try/excepted)."""
+        """Every 60s: redeem resolved positions so capital returns to cash, then wrap
+        any stranded USDC.e back into pUSD (merge/redeem return USDC.e, but the CLOB
+        trades with pUSD — without the wrap that capital never re-enters the quote
+        balance). Dry-run: log only. Isolated loop — its failure never stops quoting
+        (every pass is fully try/excepted)."""
         while not self._shutdown:
             try:
                 async with httpx.AsyncClient(timeout=10) as cl:
@@ -952,6 +956,12 @@ class MergeRunner:
                             # dollar value returned to cash (losing side redeems ~$0),
                             # not share count — the metric is USD recovered.
                             self.state.redeemed_today += float(p.get("currentValue", 0) or 0)
+                if not self.cfg.dry_run:
+                    from quoter.chain.positions_ops import usdce_balance, wrap_usdce_to_pusd
+                    bal = usdce_balance()  # read-only; None = unknown -> skip
+                    if bal is not None and bal > WRAP_MIN_USD:
+                        ok = wrap_usdce_to_pusd(bal)
+                        log.info("wrap_result", usdce=round(bal, 2), ok=ok)
             except Exception as e:
                 log.warning("redeem_sweeper_err", error=str(e))
             await asyncio.sleep(60)

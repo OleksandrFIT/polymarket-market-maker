@@ -238,3 +238,83 @@ Real relayer transaction executed from the server wallet via the NEW key-auth pa
 This proves the full Path A chain end-to-end (key-auth -> POST /submit -> proxy exec ->
 confirmation polling). merge_pairs uses the identical transport with different calldata;
 its first natural pair on the attended live test serves as the merge acceptance.
+
+## Addendum 2026-07-05: USDC.e -> pUSD wrap (`wrap_usdce_to_pusd`)
+
+Problem (verified live): the bot BUYS with pUSD, but `merge_pairs`/`redeem` return
+collateral in **USDC.e** — merge proceeds strand on the proxy and never re-enter the
+trading balance ($10 USDC.e stranded at the time of the spike).
+
+### Wrap mechanism found (on-chain investigation, 2026-07-05)
+
+- **pUSD `0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB` is an EIP-1967 UUPS proxy**
+  (impl `0x6bbcef9f7ef3b6c592c99e0f206a0de94ad0925f`), name "Polymarket USD",
+  6 decimals, Solady OwnableRoles. It is NOT a WETH-style self-serve wrapper:
+  no `deposit`/`depositFor`. It exposes `wrap(address,address,uint256,address,bytes)`
+  (`0xb97b57c7`) / `unwrap(...)` (`0xd600875d`) plus `addWrapper`/`removeWrapper`
+  and `addMinter`/`removeMinter` — **`pUSD.wrap` is role-gated**: eth_call from a
+  non-wrapper reverts Solady `Unauthorized()` (`0x82b42900`). Constants:
+  `USDCE()` = USDC.e, `USDC()` = native USDC `0x3c499c...`, `VAULT()` =
+  `0xC417fD8E9661c0d2120B64a04Bb3278C17E99DB1` (receives the wrapped USDC.e).
+- **The public conversion path is a separate permissionless wrapper contract**
+  `0x93070a847efEf7F70739046A929D47a521F5B8ee` (holds wrapper role 2 on pUSD,
+  same owner `0x47ebfac3...` as pUSD):
+  **`wrap(address token, address to, uint256 amount)` — selector `0x62355638`.**
+  It `transferFrom`s the caller's USDC.e into the pUSD contract, which mints pUSD
+  1:1 to `to` and forwards the USDC.e to the VAULT. Permissionless: eth_call
+  `wrap(USDC.e, to, 0)` from an arbitrary address succeeds (a role gate would
+  revert `Unauthorized` before the transfer; the only failure mode observed is
+  `TransferFromFailed` `0x7939f424` when balance/allowance are missing).
+- **This is exactly what the UI/user wallets do.** Live evidence, tx
+  `0xacd202c41698720d3e489994eb89528d5b4c809fbf530c3c3eeef072c111e3ec`: user proxy
+  calls `wrap(USDC.e, self, 12975200)` on `0x93070a84...` (with a standing USDC.e
+  approval to the wrapper) → USDC.e proxy→pUSD→VAULT, pUSD minted 1:1 to the proxy,
+  pUSD `Wrapped`-style event `0xc00a5c84...` (caller=wrapper, token=USDC.e,
+  to=proxy, amount). In a ~1h window, 930 wrap events, all token=USDC.e, via 5
+  registered wrapper contracts — `0x93070a84...` (plain wrap, most used, 539) and
+  four `0xada...` CTF-ops adapters (split/merge/redeem/convertPositions with
+  built-in conversion, e.g. `0xada2005600dec949baf300f4c6120000bdb6eaab`).
+- `py-builder-relayer-client` 0.0.2 has **no** dedicated convert/wrap helper (its
+  "deposit wallet" API is the onboarding deposit-address feature, unrelated).
+
+### Implementation
+
+`wrap_usdce_to_pusd(amount: float) -> bool` in `quoter/chain/positions_ops.py`:
+
+- Refuses when the proxy's on-chain USDC.e balance < amount (read-only
+  `balanceOf` eth_call first).
+- Executes AS the proxy via the same `_execute` transport as merge/redeem
+  (relayer key-auth > HMAC > direct), as **ONE batched proxy tx** of two calls:
+  1. `USDC.e.approve(0x93070a84..., amount_units)` — exact amount, no standing
+     max-allowance left behind;
+  2. `wrapper.wrap(USDC.e, proxy, amount_units)`.
+  (`_execute`/`_execute_via_relayer`/`_execute_direct` were generalized from a
+  single CTF calldata to `list[(to, calldata)]`; relayer `execute()` takes the
+  list natively, Path B sig-1 batches via `factory.proxy(calls)`, sig-0 sends
+  sequential EOA txs.)
+- Read-only helper `usdce_balance() -> float | None` (never raises) + a
+  `proxy USDC.e balance (wrap candidate)` line in `--check`.
+
+Sweeper hook (`quoter/runner/merge_runner.py`, `_redeem_sweeper`): after each
+redeem pass, when NOT dry_run and `usdce_balance() > WRAP_MIN_USD` ($5), call
+`wrap_usdce_to_pusd(balance)` and log `wrap_result`; exceptions stay inside the
+sweeper's existing try/except (never stop quoting).
+
+Tests: `tests/test_positions_wrap.py` (exact calldata, batch order, refusal
+gates — offline). **No real wrap transaction executed by this task** — the $10
+acceptance wrap runs operator-gated on the server:
+
+```bash
+.venv/bin/python -c "
+from dotenv import load_dotenv; load_dotenv('.env')
+from quoter.chain.positions_ops import usdce_balance, wrap_usdce_to_pusd
+bal = usdce_balance(); print('usdce', bal)
+print(wrap_usdce_to_pusd(bal))"
+```
+
+Expected: `relayer_tx_done` with tx hash; pUSD (UI cash) +$10, USDC.e balance ~0.
+
+Acceptance record (fill on completion):
+
+- [ ] wrap tx hash: `________________`
+- [ ] pUSD balance delta confirmed: `________`
