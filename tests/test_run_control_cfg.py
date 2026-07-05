@@ -52,12 +52,26 @@ def test_live_cfg_is_momentum_tilt_step1():
     assert c.dry_run is True
 
 
-def test_top_book_cfg_is_dry_run():
+def test_top_book_cfg_is_dry_run_by_default():
+    os.environ.pop("LIVE_GO", None)
     rc = _load_rc("top_book")
     c = rc.CFG
-    assert c.dry_run is True                  # LIVE DISABLED
+    assert c.dry_run is True                  # LIVE DISABLED without explicit LIVE_GO=1
     assert c.strategy == "top_book"
     assert c.timeframes == ("5m",)
     assert c.tb_size == 5.0
     assert c.tb_naked_cap == 10.0
-    assert c.per_window_cap == 40.0
+    assert c.per_window_cap == 15.0           # проба-пера cap
+
+
+def test_top_book_live_go_lifts_lock_only_here():
+    os.environ["LIVE_GO"] = "1"
+    try:
+        rc = _load_rc("top_book")
+        assert rc.CFG.dry_run is False        # explicit operator-set env lifts the lock
+        assert rc.CFG.per_window_cap == 15.0  # live test capped at $15/window
+        # other strategies stay HARD-locked even with LIVE_GO=1
+        rc5 = _load_rc("five_min")
+        assert rc5.CFG.dry_run is True
+    finally:
+        os.environ.pop("LIVE_GO", None)

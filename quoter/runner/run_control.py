@@ -30,11 +30,15 @@ from quoter.runner.merge_runner import MergeRunner
 from quoter.runner.control_dashboard import make_control_app
 
 if STRATEGY == "top_book":
+    # LIVE_GO=1 (systemd drop-in, operator-set) lifts the lock for top_book ONLY —
+    # first authorized attended test 2026-07-05 (cap $15/window, size 5). Default
+    # (no env) stays dry-run. Remove the drop-in to re-lock.
+    _LIVE_GO = os.environ.get("LIVE_GO") == "1"
     CFG = Config(
         strategy="top_book", assets=("BTC",), timeframes=("5m",),
         tb_size=5.0, tb_naked_cap=10.0, tb_tick=0.001, tb_merge_min=5.0,
-        per_window_cap=40.0, per_market_cap_usd=40.0, min_time_to_expiry_sec=5.0,
-        dry_run=True,                    # LIVE DISABLED
+        per_window_cap=15.0, per_market_cap_usd=15.0, min_time_to_expiry_sec=5.0,
+        dry_run=not _LIVE_GO,            # LIVE only via explicit LIVE_GO=1
     )
 elif STRATEGY == "five_min":
     CFG = Config(
@@ -56,7 +60,9 @@ else:
         tilt_frac=0.65, regime_window=30, regime_min_samples=12, regime_min_ev=0.0,
         dry_run=True,                    # LIVE DISABLED
     )
-assert CFG.dry_run is True, "LIVE TRADING DISABLED: CFG.dry_run must stay True"
+assert CFG.dry_run is True or (
+    CFG.strategy == "top_book" and os.environ.get("LIVE_GO") == "1"
+), "LIVE TRADING DISABLED: CFG.dry_run must stay True (top_book live needs LIVE_GO=1)"
 # Use continuous re-quoting (active two-sided market making) when trading.
 REQUOTE = True
 
