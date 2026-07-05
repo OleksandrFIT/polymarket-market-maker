@@ -34,9 +34,16 @@ if STRATEGY == "top_book":
     # first authorized attended test 2026-07-05 (cap $15/window, size 5). Default
     # (no env) stays dry-run. Remove the drop-in to re-lock.
     _LIVE_GO = os.environ.get("LIVE_GO") == "1"
+    try:                                 # REQUOTE_SEC=1 for the 1s-vs-2s A/B; garbage -> 2.0
+        _REQUOTE_SEC = float(os.environ.get("REQUOTE_SEC", "2") or "2")
+        if _REQUOTE_SEC <= 0:
+            _REQUOTE_SEC = 2.0
+    except (TypeError, ValueError):
+        _REQUOTE_SEC = 2.0
     CFG = Config(
         strategy="top_book", assets=("BTC",), timeframes=("5m",),
         tb_size=5.0, tb_naked_cap=6.0, tb_tick=0.001, tb_merge_min=5.0,
+        requote_sec=_REQUOTE_SEC,
         per_window_cap=15.0, per_market_cap_usd=15.0, min_time_to_expiry_sec=5.0,
         dry_run=not _LIVE_GO,            # LIVE only via explicit LIVE_GO=1
     )

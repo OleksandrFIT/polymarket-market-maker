@@ -831,6 +831,7 @@ class MergeRunner:
         oids: dict[str, list[str]] = {"Up": [], "Down": []}
         merged = 0.0
         tok = {"Up": m.yes_token, "Down": m.no_token}
+        cadence = self.cfg.requote_sec   # re-quote cadence (env REQUOTE_SEC; 2s default, 1s A/B)
         try:
             async with httpx.AsyncClient(timeout=8) as cl:
                 while m.time_remaining() > END_BUFFER_SEC and not self._shutdown:
@@ -841,7 +842,7 @@ class MergeRunner:
                         by = (await cl.get("https://clob.polymarket.com/book", params={"token_id": tok["Up"]})).json()
                         bn = (await cl.get("https://clob.polymarket.com/book", params={"token_id": tok["Down"]})).json()
                     except Exception:
-                        await asyncio.sleep(REQUOTE_SEC)
+                        await asyncio.sleep(cadence)
                         continue
                     # The whole mutate section (cancels + posts + fill-credit + merge)
                     # is try/excepted like the book GETs: one transient API error must
@@ -938,7 +939,7 @@ class MergeRunner:
                                  dn=(resting.get("Down") or (None, None))[0])
                     except Exception as e:
                         log.warning("topbook_tick_err", error=str(e))
-                    await asyncio.sleep(REQUOTE_SEC)
+                    await asyncio.sleep(cadence)
         finally:
             await self.cancel_all()
         committed = cost["Up"] + cost["Down"] + sum(p * sz for (p, sz) in resting.values())
