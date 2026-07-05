@@ -62,6 +62,9 @@ def test_top_book_cfg_is_dry_run_by_default():
     assert c.tb_size == 5.0
     assert c.tb_naked_cap == 6.0              # tightened from 10 -> франшиза у ворожому тренді ~-$2.4
     assert c.requote_sec == 2.0               # default cadence; env REQUOTE_SEC overrides
+    assert c.regime_gate is True              # auto-skip trending windows (pair-maker loses in trend)
+    assert c.regime_max_move_usd == 25.0
+    assert c.regime_lookback_min == 5
     assert c.per_window_cap == 15.0           # проба-пера cap
 
 

@@ -38,6 +38,7 @@ from quoter.runner.tilt_planner import plan_tilt
 from quoter.runner.regime_tracker import RegimeTracker
 from quoter.runner.five_min_planner import plan_five_min
 from quoter.runner.top_book_planner import plan_top_book, diff_quotes, plan_merge, committed_gate, skew_ok
+from quoter.runner.regime_gate import regime_tradeable
 from quoter.runner.paper_fill import PaperBook
 from quoter.strategy.ladder import compute_ladder
 
@@ -286,7 +287,14 @@ class MergeRunner:
                         already_traded=m.open_ts in self._traded_windows)
                     if enter:
                         if self.cfg.strategy == "top_book":
-                            await self._top_book_window(m, mid)
+                            # regime gate: the pair-maker loses in a trend (accumulates the
+                            # losing side), so skip trending windows and only trade calm/chop.
+                            if self.cfg.regime_gate and not await self._regime_tradeable():
+                                self._traded_windows.add(m.open_ts)   # don't re-check this window
+                                self.state.last_event = f"skip (trend) {m.slug}"
+                                log.info("regime_skip", slug=m.slug)
+                            else:
+                                await self._top_book_window(m, mid)
                         elif self.cfg.strategy == "five_min":
                             await self._five_min_window(m, mid)
                         elif self.requote and self.cfg.rungs > 1:
@@ -811,6 +819,28 @@ class MergeRunner:
         log.info("fivemin_done", slug=m.slug, passed=passed, winner=winner,
                  paper_spent=round(pb.spent(), 2), paper_pnl=round(paper_pnl, 2),
                  inv_yes=round(pb.inv["YES"], 1), inv_no=round(pb.inv["NO"], 1))
+
+    async def _regime_tradeable(self) -> bool:
+        """True if BTC is calm enough for the pair-maker to trade the upcoming window.
+
+        Reads the last ``regime_lookback_min`` 1m BTC closes from Binance and defers to the
+        pure ``regime_tradeable`` (net move < ``regime_max_move_usd`` = calm). A fetch error
+        FAILS OPEN (returns True): a data hiccup must not silently halt earning, and the
+        naked cap + watchdog bound the downside of a rare miss. Runs once per window entry."""
+        try:
+            async with httpx.AsyncClient(timeout=6) as cl:
+                r = await cl.get("https://api.binance.com/api/v3/klines",
+                                 params={"symbol": "BTCUSDT", "interval": "1m",
+                                         "limit": self.cfg.regime_lookback_min})
+                closes = [float(c[4]) for c in r.json()]
+            ok = regime_tradeable(closes, self.cfg.regime_max_move_usd)
+            if not ok:
+                log.info("regime_trend", move=round(abs(closes[-1] - closes[0]), 1),
+                         max=self.cfg.regime_max_move_usd)
+            return ok
+        except Exception as e:
+            log.warning("regime_check_err", error=str(e))
+            return True   # fail-open: don't let a data hiccup stop earning (cap bounds risk)
 
     async def _top_book_window(self, m, mid_at_entry: float) -> None:
         """Top-of-book MM (phase-27): keep bid best+tick on BOTH sides, skew-cap naked,

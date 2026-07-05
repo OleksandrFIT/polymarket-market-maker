@@ -112,6 +112,10 @@ class Config:
     tb_tick: float = 0.001        # price-improvement tick over best bid
     tb_merge_min: float = 5.0     # merge matched pairs once min(inv) >= this
     requote_sec: float = 2.0      # top_book re-quote cadence (read book + adjust); env REQUOTE_SEC
+    # regime gate: pair-maker only enters CALM windows (skips trends; earns in chop)
+    regime_gate: bool = False     # enable auto skip-trending-windows for top_book
+    regime_max_move_usd: float = 25.0   # net BTC move over lookback above this = trend = skip
+    regime_lookback_min: int = 5  # trailing 1m BTC closes to measure the net move over
 
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle

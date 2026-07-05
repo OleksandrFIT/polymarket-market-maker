@@ -44,6 +44,7 @@ if STRATEGY == "top_book":
         strategy="top_book", assets=("BTC",), timeframes=("5m",),
         tb_size=5.0, tb_naked_cap=6.0, tb_tick=0.001, tb_merge_min=5.0,
         requote_sec=_REQUOTE_SEC,
+        regime_gate=True, regime_max_move_usd=25.0, regime_lookback_min=5,  # skip trends
         per_window_cap=15.0, per_market_cap_usd=15.0, min_time_to_expiry_sec=5.0,
         dry_run=not _LIVE_GO,            # LIVE only via explicit LIVE_GO=1
     )
