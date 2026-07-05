@@ -4,7 +4,9 @@
 # so a normal trending window looked like a -$16 drawdown when reality was -$1.2).
 # equity = pUSD + USDC.e (on-chain) + $1 x matched pairs in open positions (naked counted
 # at $0 — conservative). Baseline = first reading (delete live_watch_base.txt to reset).
-# Breaches -> POST /api/force_stop: equity drawdown < -$10 | naked > 10 | merge_fails >= 2.
+# Breaches -> POST /api/force_stop: equity drawdown < -$10 | naked > 8 | merge_fails >= 2.
+# naked tripwire is cap (6) + 2-share slack for on-chain read lag; the hard skew gate
+# should hold naked <= 6, so a read > 8 means the gate failed -> stop.
 LIMIT=-10.0
 BASE_F=/home/ubuntu/live_watch_base.txt
 while true; do
@@ -53,7 +55,7 @@ PYEOF
   echo "$(date -u +%T) mode=$MODE equity=$TOTAL (pUSD=$PUSD usdce=$USDCE pairs=\$$PAIRS) dd=$DD naked=$NAKED merge_fails=$MF"
   BREACH=""
   python3 -c "exit(0 if float('$DD') < $LIMIT else 1)" && BREACH="equity dd<$LIMIT"
-  [ "${NAKED:-0}" -gt 10 ] 2>/dev/null && BREACH="naked>10"
+  [ "${NAKED:-0}" -gt 8 ] 2>/dev/null && BREACH="naked>8"
   [ "${MF:-0}" -ge 2 ] 2>/dev/null && BREACH="merge_failed x$MF"
   if [ -n "$BREACH" ] && [ "$MODE" = "RUNNING" ]; then
     echo "$(date -u +%T) *** BREACH: $BREACH -> FORCE STOP ***"

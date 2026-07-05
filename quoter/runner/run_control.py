@@ -36,7 +36,7 @@ if STRATEGY == "top_book":
     _LIVE_GO = os.environ.get("LIVE_GO") == "1"
     CFG = Config(
         strategy="top_book", assets=("BTC",), timeframes=("5m",),
-        tb_size=5.0, tb_naked_cap=10.0, tb_tick=0.001, tb_merge_min=5.0,
+        tb_size=5.0, tb_naked_cap=6.0, tb_tick=0.001, tb_merge_min=5.0,
         per_window_cap=15.0, per_market_cap_usd=15.0, min_time_to_expiry_sec=5.0,
         dry_run=not _LIVE_GO,            # LIVE only via explicit LIVE_GO=1
     )

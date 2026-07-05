@@ -108,7 +108,7 @@ class Config:
 
     # ── phase-27 top-of-book MM strategy ──
     tb_size: float = 5.0          # shares per quote per side
-    tb_naked_cap: float = 10.0    # stop quoting a side when inv[side]-inv[other] >= cap
+    tb_naked_cap: float = 10.0    # hard skew: stop a side when inv[side]+size-inv[other] > cap
     tb_tick: float = 0.001        # price-improvement tick over best bid
     tb_merge_min: float = 5.0     # merge matched pairs once min(inv) >= this
 

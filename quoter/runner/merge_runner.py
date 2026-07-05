@@ -37,7 +37,7 @@ from quoter.runner.trend_detector import detect_bias, sigma_remaining
 from quoter.runner.tilt_planner import plan_tilt
 from quoter.runner.regime_tracker import RegimeTracker
 from quoter.runner.five_min_planner import plan_five_min
-from quoter.runner.top_book_planner import plan_top_book, diff_quotes, plan_merge, committed_gate
+from quoter.runner.top_book_planner import plan_top_book, diff_quotes, plan_merge, committed_gate, skew_ok
 from quoter.runner.paper_fill import PaperBook
 from quoter.strategy.ladder import compute_ladder
 
@@ -866,6 +866,17 @@ class MergeRunner:
                             oids[side] = []
                             resting.pop(side, None)
                         for q in post:
+                            other = "Down" if q.side == "Up" else "Up"
+                            # HARD skew re-check against MID-TICK inventory. The plan gate
+                            # ran on tick-top inv, but the cancel loop above may have just
+                            # credited a full fill of the repriced order (partial-credit),
+                            # so inv[q.side] can already be at cap here. Without this a
+                            # reprice-during-trend would rest a fresh size-`size` order on
+                            # top of at-cap inventory -> naked up to cap+size (the residual
+                            # overshoot found in review). Mirrors the committed_gate re-check.
+                            if not skew_ok(inv[q.side], inv[other], q.size,
+                                           self.cfg.tb_naked_cap):
+                                continue
                             # committed-capital gate, re-checked per post: each approved
                             # quote lands in `resting` (counted below) before the next
                             # check, so several same-tick posts can't jointly overshoot.

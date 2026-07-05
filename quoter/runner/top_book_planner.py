@@ -23,13 +23,30 @@ def _best_ask(book) -> float | None:
     return min((float(lvl["price"]) for lvl in asks), default=None)
 
 
+def skew_ok(inv_side: float, inv_other: float, size: float, naked_cap: float) -> bool:
+    """HARD skew cap: may we rest a size-`size` order on this side?
+
+    The order we'd rest can itself fill fully before the next requote re-evaluates, so
+    count it: worst-case naked = inv_side + size - inv_other. True iff that stays ≤ cap
+    (boundary-inclusive — the cap is reachable, filling to EXACTLY cap, but not
+    breachable). The old gate looked only at already-filled inv and let a burst-fill
+    overshoot by up to `size` (seen live: cap 10 → 14/20 naked in a trending window).
+
+    Used by ``plan_top_book`` AND re-checked in the runner's post loop: the planner gate
+    runs once per tick on tick-top inv, but a fill can be credited MID-tick via the
+    cancel-and-reprice path, so the post loop must re-check against the fresh inv (mirrors
+    the ``committed_gate`` re-check already done there for capital).
+    """
+    return inv_side + size - inv_other <= naked_cap
+
+
 def plan_top_book(yes_book, no_book, inv_up: float, inv_dn: float,
                   naked_cap: float, size: float, tick: float = 0.001) -> list[TBQuote]:
     out: list[TBQuote] = []
     inv = {"Up": inv_up, "Down": inv_dn}
     for side, book in (("Up", yes_book), ("Down", no_book)):
         other = "Down" if side == "Up" else "Up"
-        if inv[side] - inv[other] >= naked_cap:
+        if not skew_ok(inv[side], inv[other], size, naked_cap):
             continue
         bb = _best_bid(book)
         if bb is None:

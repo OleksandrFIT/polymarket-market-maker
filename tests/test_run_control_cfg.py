@@ -60,7 +60,7 @@ def test_top_book_cfg_is_dry_run_by_default():
     assert c.strategy == "top_book"
     assert c.timeframes == ("5m",)
     assert c.tb_size == 5.0
-    assert c.tb_naked_cap == 10.0
+    assert c.tb_naked_cap == 6.0              # tightened from 10 -> франшиза у ворожому тренді ~-$2.4
     assert c.per_window_cap == 15.0           # проба-пера cap
 
 
