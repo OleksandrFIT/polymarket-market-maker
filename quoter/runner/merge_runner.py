@@ -966,6 +966,7 @@ class MergeRunner:
                                 heavy_avg = (held_cost[heavy] / inv[heavy]
                                              if inv[heavy] > 0 else None)
                                 light_ask = _best(bn if light == "Down" else by, "asks")
+                                heavy_bid = _best(by if heavy == "Up" else bn, "bids")
                                 now = monotonic()
                                 # balance-only (light never exceeds heavy) minus completes
                                 # still inside the feed-lag window (inv may not yet reflect
@@ -975,12 +976,20 @@ class MergeRunner:
                                 recent = recent_complete_qty(tb_completed[light], now,
                                                              self.cfg.inv_reconcile_grace_sec)
                                 qty = balance_complete_qty(abs(naked), recent)
-                                budget_left = self.cfg.per_window_cap - (cost["Up"] + cost["Down"])
+                                # completion gets $ headroom ABOVE the maker cap: it is SELF-
+                                # FUNDING (the merge returns $1/pair, more than the <$1 paid),
+                                # so the gross committed counter must not block it. Subtract
+                                # resting maker notional too so TOTAL committed (cost + resting +
+                                # completion) is a TRUE hard bound at per_window_cap+complete_budget.
+                                resting_notional = sum(p * sz for (p, sz) in resting.values())
+                                budget_left = ((self.cfg.per_window_cap + self.cfg.complete_budget)
+                                               - (cost["Up"] + cost["Down"]) - resting_notional)
                                 if light_ask and light_ask > 0:
                                     qty = min(qty, budget_left / light_ask)
                                 qty = float(int(qty))
-                                if (qty >= 1 and light_ask and heavy_avg is not None
-                                        and (heavy_avg + light_ask) < 1.0):
+                                can_complete = (qty >= 1 and light_ask and heavy_avg is not None
+                                                and (heavy_avg + light_ask) < 1.0)
+                                if can_complete:
                                     r = await self._place_limit(
                                         token_id=tok[light], price=light_ask, size=qty,
                                         side="BUY", post_only=False, order_type="FOK")
@@ -998,6 +1007,29 @@ class MergeRunner:
                                         tb_completed[light].append((now, filled))
                                         log.info("topbook_complete", side=light, qty=filled,
                                                  price=round(light_ask, 3))
+                                elif self.cfg.tb_sell_naked and heavy_bid and heavy_bid > 0:
+                                    # pair >= $1 (market moved against us / trend): completing
+                                    # would BUY the winner at a premium and lock a bigger loss.
+                                    # Instead SELL the heavy loser into its bid — recovers its
+                                    # value, and since the Polymarket price LAGS BTC the bid is
+                                    # richer than fair, so this beats riding to resolution.
+                                    sq = float(int(abs(naked)))
+                                    r = await self._place_limit(
+                                        token_id=tok[heavy], price=heavy_bid, size=sq,
+                                        side="SELL", post_only=False, order_type="FOK")
+                                    # credit ONLY the real sold size (killed FOK -> 0, no phantom
+                                    # under-hold; None -> 0: keep the leg and retry next tick).
+                                    sold = (self._order_matched(r["order_id"])
+                                            if (r and r.get("order_id")) else None)
+                                    if sold:
+                                        avg_h = held_cost[heavy] / inv[heavy] if inv[heavy] > 0 else 0.0
+                                        held_cost[heavy] = max(0.0, held_cost[heavy] - sold * avg_h)
+                                        inv[heavy] -= sold
+                                        if inv[heavy] <= 0:      # clear float residual once flat
+                                            inv[heavy] = 0.0
+                                            held_cost[heavy] = 0.0
+                                        log.info("topbook_sell_naked", side=heavy, qty=sold,
+                                                 price=round(heavy_bid, 3))
                         # merge matched pairs (committed `cost` NOT reduced; held_cost IS, to
                         # keep per-share avg correct). Near-end merge ANY complete pair (min 1)
                         # so a just-completed sub-tb_merge_min pair doesn't ride unmerged.
@@ -1010,6 +1042,9 @@ class MergeRunner:
                                     avg_s = held_cost[s] / inv[s] if inv[s] > 0 else 0.0
                                     held_cost[s] = max(0.0, held_cost[s] - mq * avg_s)
                                     inv[s] -= mq
+                                    if inv[s] <= 0:          # clear float residual once flat
+                                        inv[s] = 0.0
+                                        held_cost[s] = 0.0
                                 merged += mq
                                 self.state.merged_today += mq
                         self.state.pairs_caught = int(min(inv["Up"], inv["Down"]))

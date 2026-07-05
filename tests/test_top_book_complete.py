@@ -1,13 +1,9 @@
-"""Integration tests for top_book near-end pair completion — incl. the two bugs an
-adversarial review caught in the first cut:
-
-  1. a KILLED FOK still returns success+order_id; crediting `qty` on id-presence alone
-     phantom-closes a naked leg that actually rides to resolution (invisible loss).
-  2. a CUMULATIVE tb_completed counter permanently suppresses genuinely-new naked after
-     the first completion+merge (balance_complete_qty(5, 5)=0).
-
-Drives one real `_top_book_window`: Up fills and builds a naked leg; near window-end the
-loop taker-buys (FOK) the light leg, credits ONLY the real matched size, and merges.
+"""Integration tests for top_book near-end naked handling:
+  - COMPLETE the pair (buy light leg) when it costs < $1 -> zero naked (calm windows)
+  - self-funding budget headroom so completion fires even when the maker $ cap is exhausted
+  - SELL the loser (heavy leg) when the pair >= $1 (trend) instead of riding to resolution
+Plus the two bugs a review caught in the first cut: a killed FOK must not phantom-close a
+leg, and a cumulative completed-counter must not permanently suppress genuinely-new naked.
 """
 import asyncio
 
@@ -21,11 +17,12 @@ class _Ctl:
     def __init__(self):
         self.t_remaining = 100.0
         self.tick = 0
-        self.clock = 1000.0            # patched monotonic() (advance to age completes)
-        self.dt = 0.0                  # clock advance per tick
-        self.places = []               # (token, price, size, post_only, order_type)
+        self.clock = 1000.0
+        self.dt = 0.0
+        self.places = []           # (token, side, price, size, post_only, order_type)
         self.open = set()
-        self.kind = {}                 # oid -> "FOK" | "maker"
+        self.kind = {}
+        self.size = {}             # oid -> requested size (FOK matches its own size, or 0 if killed)
         self.seq = 0
 
 
@@ -43,7 +40,7 @@ def _book(bid, ask):
 
 
 class _M:
-    slug = "btc-updown-5m-complete"
+    slug = "btc-updown-5m-x"
     yes_token = "UP"
     no_token = "DN"
     open_ts = 1
@@ -55,12 +52,14 @@ class _M:
         return self._ctl.t_remaining
 
 
-def _make_runner(ctl, fok_matched=5.0):
+def _make_runner(ctl, fok_fills=True, per_window_cap=15.0, complete_budget=0.0,
+                 tb_sell_naked=False):
     r = MergeRunner.__new__(MergeRunner)
     r.cfg = Config(
         strategy="top_book", assets=("BTC",), timeframes=("5m",),
         tb_size=5.0, tb_naked_cap=6.0, tb_tick=0.001, tb_merge_min=5.0,
-        per_window_cap=15.0, tb_complete=True, tb_complete_gate_sec=45.0,
+        per_window_cap=per_window_cap, tb_complete=True, tb_complete_gate_sec=45.0,
+        complete_budget=complete_budget, tb_sell_naked=tb_sell_naked,
         inv_reconcile_grace_sec=12.0, dry_run=False,
     )
     r.state = TradingState()
@@ -70,14 +69,12 @@ def _make_runner(ctl, fok_matched=5.0):
     async def fake_place(**kw):
         ctl.seq += 1
         oid = f"o{ctl.seq}"
-        is_fok = kw.get("order_type") == "FOK"
-        ctl.kind[oid] = "FOK" if is_fok else "maker"
-        ctl.places.append((kw["token_id"], kw["price"], kw["size"],
+        ctl.kind[oid] = "FOK" if kw.get("order_type") == "FOK" else "maker"
+        ctl.size[oid] = kw["size"]
+        ctl.places.append((kw["token_id"], kw["side"], kw["price"], kw["size"],
                            kw.get("post_only"), kw.get("order_type")))
-        # Up maker -> instantly filled (never in open -> vanishes -> credited); Down maker
-        # -> stays open (no maker fill); FOK -> not tracked in open.
         if kw.get("post_only") and kw["token_id"] == "DN":
-            ctl.open.add(oid)
+            ctl.open.add(oid)          # Down maker rests (no fill); Up maker vanishes (filled)
         return {"order_id": oid, "status": "live"}
 
     async def fake_cancel(oids):
@@ -91,8 +88,12 @@ def _make_runner(ctl, fok_matched=5.0):
         return True
 
     def order_matched(oid):
-        # FOK completion returns fok_matched (0 = killed); maker Up fill returns full size.
-        return fok_matched if ctl.kind.get(oid) == "FOK" else 5.0
+        # a real FOK matches its OWN size (all-or-nothing) or 0 if killed; a maker order
+        # matches its resting size. Returning a fixed number regardless of size would let a
+        # budget-shrunk order over-credit — the exact bug this test must not hide.
+        if ctl.kind.get(oid) == "FOK":
+            return ctl.size.get(oid, 0.0) if fok_fills else 0.0
+        return ctl.size.get(oid, 5.0)
 
     r._place_limit = fake_place
     r._cancel_orders = fake_cancel
@@ -103,7 +104,7 @@ def _make_runner(ctl, fok_matched=5.0):
     return r
 
 
-def _run(ctl, runner, n_ticks, monkeypatch):
+def _run(ctl, runner, n_ticks, monkeypatch, up=(0.50, 0.99), dn=(0.01, 0.45)):
     class _Cl:
         async def __aenter__(self):
             return self
@@ -112,14 +113,12 @@ def _run(ctl, runner, n_ticks, monkeypatch):
             return False
 
         async def get(self, url, params=None):
-            if params["token_id"] == "UP":
-                return _Resp(_book(0.50, 0.99))      # Up bid fills our maker; ask far
-            return _Resp(_book(0.01, 0.45))          # Down: no maker fill; cheap ask to complete
+            return _Resp(_book(*up)) if params["token_id"] == "UP" else _Resp(_book(*dn))
 
     async def fake_sleep(_):
         ctl.tick += 1
         ctl.clock += ctl.dt
-        ctl.t_remaining = 40.0                        # in the completion gate from tick 2 on
+        ctl.t_remaining = 40.0
         if ctl.tick >= n_ticks:
             runner._shutdown = True
 
@@ -129,36 +128,63 @@ def _run(ctl, runner, n_ticks, monkeypatch):
     asyncio.run(runner._top_book_window(_M(ctl), 0.5))
 
 
-def _fok_places(ctl):
-    return [p for p in ctl.places if p[0] == "DN" and p[3] is False and p[4] == "FOK"]
+def _fok_buys(ctl, token):
+    return [p for p in ctl.places if p[0] == token and p[1] == "BUY" and p[5] == "FOK"]
+
+
+def _fok_sells(ctl, token):
+    return [p for p in ctl.places if p[0] == token and p[1] == "SELL" and p[5] == "FOK"]
 
 
 def test_near_end_completes_naked_pair_to_zero(monkeypatch):
     ctl = _Ctl()
-    runner = _make_runner(ctl, fok_matched=5.0)
-    _run(ctl, runner, n_ticks=2, monkeypatch=monkeypatch)
-    fok = _fok_places(ctl)
-    assert fok and fok[0][2] == 5.0, ctl.places       # FOK BUY 5 Down to complete
-    assert runner.state.naked_shares == 0             # completed pair merged -> zero naked
+    runner = _make_runner(ctl)
+    _run(ctl, runner, 2, monkeypatch)
+    assert _fok_buys(ctl, "DN") and _fok_buys(ctl, "DN")[0][3] == 5.0
+    assert runner.state.naked_shares == 0
 
 
 def test_killed_fok_does_not_phantom_close(monkeypatch):
-    # FOK is KILLED (matched 0): the bot must NOT phantom-credit/merge — it must still
-    # KNOW it holds the naked leg (state reflects reality), not falsely read flat.
     ctl = _Ctl()
-    runner = _make_runner(ctl, fok_matched=0.0)
-    _run(ctl, runner, n_ticks=2, monkeypatch=monkeypatch)
-    assert _fok_places(ctl), "completion should still attempt the FOK"
-    assert runner.state.naked_shares == 5             # naked NOT phantom-closed
+    runner = _make_runner(ctl, fok_fills=False)          # FOK killed -> no fill
+    _run(ctl, runner, 2, monkeypatch)
+    assert _fok_buys(ctl, "DN"), "completion should still attempt the FOK"
+    assert runner.state.naked_shares == 5                # naked NOT phantom-closed
 
 
 def test_completion_not_suppressed_after_merge(monkeypatch):
-    # cycle 1 completes+merges a naked; clock advances past the feed-lag grace (12s);
-    # cycle 2's genuinely-new naked must complete AGAIN (a cumulative counter would
-    # suppress it: balance_complete_qty(5, 5)=0).
     ctl = _Ctl()
-    ctl.dt = 20.0                                     # age each completion past the 12s grace
-    runner = _make_runner(ctl, fok_matched=5.0)
-    _run(ctl, runner, n_ticks=3, monkeypatch=monkeypatch)
-    assert len(_fok_places(ctl)) >= 2, ctl.places     # second naked NOT suppressed
+    ctl.dt = 20.0                                         # age each completion past 12s grace
+    runner = _make_runner(ctl)
+    _run(ctl, runner, 3, monkeypatch)
+    assert len(_fok_buys(ctl, "DN")) >= 2
     assert runner.state.naked_shares == 0
+
+
+def test_cap_exhausted_needs_budget_to_fully_close(monkeypatch):
+    # per_window_cap 3.0: after Up fills (cost 2.5) the maker $ budget is nearly spent, so
+    # WITHOUT complete_budget the completion can only buy ~1 Down -> naked NOT fully closed.
+    ctl = _Ctl()
+    runner = _make_runner(ctl, per_window_cap=3.0, complete_budget=0.0)
+    _run(ctl, runner, 2, monkeypatch)
+    assert runner.state.naked_shares > 0                 # couldn't fully complete (budget-starved)
+
+
+def test_budget_headroom_closes_cap_frozen_naked(monkeypatch):
+    # same cap 3.0, but complete_budget 6.0 gives self-funding headroom -> full completion.
+    ctl = _Ctl()
+    runner = _make_runner(ctl, per_window_cap=3.0, complete_budget=6.0)
+    _run(ctl, runner, 2, monkeypatch)
+    assert _fok_buys(ctl, "DN") and _fok_buys(ctl, "DN")[0][3] == 5.0
+    assert runner.state.naked_shares == 0
+
+
+def test_trend_sells_loser_when_pair_over_dollar(monkeypatch):
+    # Down ask expensive (0.85): heavy_avg 0.5 + 0.85 = 1.35 >= $1 -> completing would lock a
+    # bigger loss. With tb_sell_naked the loop SELLS the heavy Up loser into its bid instead.
+    ctl = _Ctl()
+    runner = _make_runner(ctl, tb_sell_naked=True)
+    _run(ctl, runner, 2, monkeypatch, up=(0.50, 0.99), dn=(0.01, 0.85))
+    assert not _fok_buys(ctl, "DN"), "must NOT complete an over-$1 pair"
+    assert _fok_sells(ctl, "UP") and _fok_sells(ctl, "UP")[0][3] == 5.0
+    assert runner.state.naked_shares == 0                # loser sold -> zero naked

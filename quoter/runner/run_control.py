@@ -46,6 +46,7 @@ if STRATEGY == "top_book":
         requote_sec=_REQUOTE_SEC,
         regime_gate=True, regime_max_move_usd=25.0, regime_lookback_min=5,  # skip trends
         tb_complete=True, tb_complete_gate_sec=45.0,   # close naked pairs near window-end
+        complete_budget=6.0, tb_sell_naked=True,       # self-funding headroom; SELL loser in trend
         per_window_cap=15.0, per_market_cap_usd=15.0, min_time_to_expiry_sec=5.0,
         dry_run=not _LIVE_GO,            # LIVE only via explicit LIVE_GO=1
     )

@@ -119,6 +119,8 @@ class Config:
     # near-end pair completion: buy the light leg to close a naked pair (zero naked residual)
     tb_complete: bool = False           # enable near-end pair completion for top_book
     tb_complete_gate_sec: float = 45.0  # act only in the last this-many sec of the window
+    complete_budget: float = 0.0        # $ headroom ABOVE per_window_cap for completes (self-funding)
+    tb_sell_naked: bool = False         # when pair >= $1 (trend), SELL the loser instead of riding
 
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle
