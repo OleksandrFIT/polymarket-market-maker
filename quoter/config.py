@@ -116,6 +116,9 @@ class Config:
     regime_gate: bool = False     # enable auto skip-trending-windows for top_book
     regime_max_move_usd: float = 25.0   # net BTC move over lookback above this = trend = skip
     regime_lookback_min: int = 5  # trailing 1m BTC closes to measure the net move over
+    # linked-pair quoting: cap the light-side bid so a fill pairs against the held heavy leg
+    # for < $1 by construction (fixes async-fill pairs >$1); 0 = off
+    tb_link_margin: float = 0.0
     # near-end pair completion: buy the light leg to close a naked pair (zero naked residual)
     tb_complete: bool = False           # enable near-end pair completion for top_book
     tb_complete_gate_sec: float = 45.0  # act only in the last this-many sec of the window

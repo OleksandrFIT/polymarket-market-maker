@@ -1,4 +1,46 @@
-from quoter.runner.top_book_planner import plan_top_book, diff_quotes, plan_merge, TBQuote, skew_ok
+from quoter.runner.top_book_planner import (
+    plan_top_book, diff_quotes, plan_merge, TBQuote, skew_ok, link_pair_bids)
+
+
+def test_link_pair_caps_light_bid_below_one():
+    # hold 5 Up @ avg 0.32; Down (light) quote 0.741 (market moved) -> capped to 1-0.32-0.01=0.67
+    tgt = [TBQuote("Down", 0.741, 5.0)]
+    out = link_pair_bids(tgt, {"Up": 5.0, "Down": 0.0}, {"Up": 0.32, "Down": None}, 0.01)
+    assert out[0].side == "Down" and out[0].price == 0.67   # pair 0.32+0.67 = 0.99 < $1
+
+
+def test_link_pair_keeps_bid_when_already_below_cap():
+    # Down quote 0.65 is already < cap 0.67 -> keep it (don't raise)
+    out = link_pair_bids([TBQuote("Down", 0.65, 5.0)], {"Up": 5.0, "Down": 0.0},
+                         {"Up": 0.32, "Down": None}, 0.01)
+    assert out[0].price == 0.65
+
+
+def test_link_pair_leaves_heavy_side_untouched():
+    # quoting the HEAVY side (Up, which we hold more of) is not capped
+    out = link_pair_bids([TBQuote("Up", 0.481, 5.0)], {"Up": 5.0, "Down": 0.0},
+                         {"Up": 0.32, "Down": None}, 0.01)
+    assert out[0].price == 0.481
+
+
+def test_link_pair_balanced_unchanged():
+    # no heavy leg (balanced / no holdings) -> both quotes unchanged
+    tgt = [TBQuote("Up", 0.481, 5.0), TBQuote("Down", 0.521, 5.0)]
+    out = link_pair_bids(tgt, {"Up": 0.0, "Down": 0.0}, {"Up": None, "Down": None}, 0.01)
+    assert [(q.side, q.price) for q in out] == [("Up", 0.481), ("Down", 0.521)]
+
+
+def test_link_pair_drops_side_when_cap_nonpositive():
+    # heavy avg 0.995 -> cap = 1-0.995-0.01 = -0.005 -> can't pair profitably -> drop
+    out = link_pair_bids([TBQuote("Down", 0.02, 5.0)], {"Up": 5.0, "Down": 0.0},
+                         {"Up": 0.995, "Down": None}, 0.01)
+    assert out == []
+
+
+def test_link_pair_off_when_margin_zero():
+    tgt = [TBQuote("Down", 0.741, 5.0)]
+    out = link_pair_bids(tgt, {"Up": 5.0, "Down": 0.0}, {"Up": 0.32, "Down": None}, 0.0)
+    assert out[0].price == 0.741                            # feature off -> unchanged
 
 
 def test_skew_ok_boundary():

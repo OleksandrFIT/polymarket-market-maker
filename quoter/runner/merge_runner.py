@@ -37,7 +37,8 @@ from quoter.runner.trend_detector import detect_bias, sigma_remaining
 from quoter.runner.tilt_planner import plan_tilt
 from quoter.runner.regime_tracker import RegimeTracker
 from quoter.runner.five_min_planner import plan_five_min
-from quoter.runner.top_book_planner import plan_top_book, diff_quotes, plan_merge, committed_gate, skew_ok
+from quoter.runner.top_book_planner import (
+    plan_top_book, diff_quotes, plan_merge, committed_gate, skew_ok, link_pair_bids)
 from quoter.runner.regime_gate import regime_tradeable
 from quoter.runner.paper_fill import PaperBook
 from quoter.strategy.ladder import compute_ladder
@@ -882,6 +883,11 @@ class MergeRunner:
                     try:
                         target = plan_top_book(by, bn, inv["Up"], inv["Down"],
                                                self.cfg.tb_naked_cap, self.cfg.tb_size, self.cfg.tb_tick)
+                        # LINKED-PAIR: cap the light-side bid so any pairing fill stays < $1
+                        # (avg = held per-share cost, correct across merges). Off when margin=0.
+                        avg = {s: (held_cost[s] / inv[s] if inv[s] > 0 else None)
+                               for s in ("Up", "Down")}
+                        target = link_pair_bids(target, inv, avg, self.cfg.tb_link_margin)
                         cancel, post = diff_quotes(resting, target)
                         for side in cancel:
                             # partial fills: credit the matched portion BEFORE clearing

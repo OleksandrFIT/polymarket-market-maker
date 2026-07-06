@@ -66,6 +66,39 @@ def plan_top_book(yes_book, no_book, inv_up: float, inv_dn: float,
     return out
 
 
+def link_pair_bids(target: list[TBQuote], inv: dict, avg: dict, margin: float) -> list[TBQuote]:
+    """LINKED-PAIR quoting: cap each LIGHT-side (under-weight) bid so a fill pairs against the
+    held HEAVY leg for < $1 by construction — bid <= 1 - heavy_avg - margin.
+
+    Fixes the async-fill loss: quoting both sides at best+tick independently fills the two legs
+    at DIFFERENT market states (market moves between fills), so pair cost can exceed $1 (live-
+    proven: leg1 at 0.32, market moves, leg2 at 0.74 -> pair 1.06). Live book shows best_bid_up
+    + best_bid_dn = 0.99 (a real +1c merge edge) — but only if BOTH legs fill at the same state.
+    Capping the light bid at 1 - heavy_avg - margin guarantees any pairing fill stays < $1; if
+    the market moved away the capped bid rests below best and simply doesn't fill (-> hold naked,
+    handled near-end), never overpaying. Heavy side is left unchanged. A light cap <= 0 drops
+    that side (can't pair profitably). margin <= 0 -> unchanged (feature off).
+    """
+    if margin <= 0:
+        return target
+    # Per-order safety: a light order is priced against the heavy avg AT POST TIME. If more
+    # heavy fills later (raising heavy_avg) before this light order fills, the resting order
+    # isn't re-tightened until the next requote — but it still pairs < $1 against the heavy
+    # shares that existed when it was priced (the new heavy shares pair against FUTURE light
+    # fills). So each light fill is individually capped; the blended pair cost stays < $1.
+    out: list[TBQuote] = []
+    for q in target:
+        heavy = "Down" if q.side == "Up" else "Up"
+        if inv.get(heavy, 0.0) > inv.get(q.side, 0.0) and avg.get(heavy) is not None:
+            capped = min(q.price, round(1.0 - avg[heavy] - margin, 3))
+            if capped <= 0:
+                continue
+            out.append(TBQuote(q.side, capped, q.size))
+        else:
+            out.append(q)
+    return out
+
+
 def diff_quotes(current: dict, target: list[TBQuote]):
     """current: {side: (price, size)} of what we have resting.
     Returns (sides_to_cancel, quotes_to_post). A resting quote is kept iff its side is in

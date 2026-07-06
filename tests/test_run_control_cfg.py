@@ -67,6 +67,7 @@ def test_top_book_cfg_is_dry_run_by_default():
     assert c.regime_lookback_min == 5
     assert c.tb_complete is True              # near-end pair completion (zero naked residual)
     assert c.tb_complete_gate_sec == 45.0
+    assert c.tb_link_margin == 0.01           # linked-pair quoting (pairs < $1 by construction)
     assert c.complete_budget == 6.0           # self-funding headroom above the $15 maker cap
     assert c.tb_sell_naked is True            # SELL the loser when pair >= $1 (trend), not ride
     assert c.per_window_cap == 15.0           # проба-пера cap
