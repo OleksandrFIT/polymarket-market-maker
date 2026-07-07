@@ -8,7 +8,7 @@ import os
 import time
 import urllib.request
 
-CACHE = "/tmp/poly_mm_cache"
+CACHE = os.environ.get("POLY_MM_CACHE", "/tmp/poly_mm_cache")   # disk-backed on small-RAM hosts
 UA = {"User-Agent": "Mozilla/5.0"}
 
 
