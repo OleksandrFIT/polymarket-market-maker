@@ -859,7 +859,6 @@ class MergeRunner:
         inv = {"Up": 0.0, "Down": 0.0}     # filled (credit-on-vanish + partial credit)
         cost = {"Up": 0.0, "Down": 0.0}    # realized cost basis — NEVER decremented (committed cap)
         held_cost = {"Up": 0.0, "Down": 0.0}   # cost of shares STILL held — decremented on merge
-        tb_completed: dict[str, list[tuple[float, float]]] = {"Up": [], "Down": []}  # (t, qty) completes
         resting: dict[str, tuple[float, float]] = {}   # side -> (price, size)
         oids: dict[str, list[str]] = {"Up": [], "Down": []}
         merged = 0.0
@@ -971,8 +970,13 @@ class MergeRunner:
                         # HELD avg — held_cost/inv, correct across merges unlike cumulative cost);
                         # else the small residual rides (no risky SELL in v1). Balance-only +
                         # lag-safe + $ budget bound. Live only (dry_run does no taker buys).
+                        # COMPLETE runs near-end OR continuously (tb_complete_continuous) — the
+                        # latter minimizes time spent naked by pairing profitable (<$1) legs all
+                        # window (direction-neutral). SELL (dump loser) stays near-end only — never
+                        # panic-sell mid-window (the market may recover).
                         near_end = m.time_remaining() <= self.cfg.tb_complete_gate_sec
-                        if self.cfg.tb_complete and not self.cfg.dry_run and near_end:
+                        act = near_end or self.cfg.tb_complete_continuous
+                        if self.cfg.tb_complete and not self.cfg.dry_run and act:
                             naked = inv["Up"] - inv["Down"]
                             if naked != 0:
                                 light = "Down" if naked > 0 else "Up"
@@ -981,15 +985,14 @@ class MergeRunner:
                                              if inv[heavy] > 0 else None)
                                 light_ask = _best(bn if light == "Down" else by, "asks")
                                 heavy_bid = _best(by if heavy == "Up" else bn, "bids")
-                                now = monotonic()
-                                # balance-only (light never exceeds heavy) minus completes
-                                # still inside the feed-lag window (inv may not yet reflect
-                                # them). A CUMULATIVE total would wrongly suppress genuinely-
-                                # new naked later in the window (once a completed pair merges
-                                # out, its qty must stop offsetting) — so track timestamped.
-                                recent = recent_complete_qty(tb_completed[light], now,
-                                                             self.cfg.inv_reconcile_grace_sec)
-                                qty = balance_complete_qty(abs(naked), recent)
+                                # balance-only (light never exceeds heavy). NO feed-lag grace
+                                # here: unlike the ladder path, top_book's `inv` is LOCAL and
+                                # credited SYNCHRONOUSLY (the FOK's real matched size is added
+                                # to inv[light] this same tick, and merged out), so `naked`
+                                # already reflects prior completions — subtracting a grace
+                                # window would wrongly throttle continuous completion of a
+                                # genuinely-new same-side naked that forms within the grace.
+                                qty = balance_complete_qty(abs(naked), 0.0)
                                 # completion gets $ headroom ABOVE the maker cap: it is SELF-
                                 # FUNDING (the merge returns $1/pair, more than the <$1 paid),
                                 # so the gross committed counter must not block it. Subtract
@@ -1018,10 +1021,9 @@ class MergeRunner:
                                         inv[light] += filled
                                         cost[light] += filled * light_ask
                                         held_cost[light] += filled * light_ask
-                                        tb_completed[light].append((now, filled))
                                         log.info("topbook_complete", side=light, qty=filled,
                                                  price=round(light_ask, 3))
-                                elif self.cfg.tb_sell_naked and heavy_bid and heavy_bid > 0:
+                                elif near_end and self.cfg.tb_sell_naked and heavy_bid and heavy_bid > 0:
                                     # pair >= $1 (market moved against us / trend): completing
                                     # would BUY the winner at a premium and lock a bigger loss.
                                     # Instead SELL the heavy loser into its bid — recovers its

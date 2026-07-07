@@ -53,13 +53,14 @@ class _M:
 
 
 def _make_runner(ctl, fok_fills=True, per_window_cap=15.0, complete_budget=0.0,
-                 tb_sell_naked=False):
+                 tb_sell_naked=False, tb_complete_continuous=False):
     r = MergeRunner.__new__(MergeRunner)
     r.cfg = Config(
         strategy="top_book", assets=("BTC",), timeframes=("5m",),
         tb_size=5.0, tb_naked_cap=6.0, tb_tick=0.001, tb_merge_min=5.0,
         per_window_cap=per_window_cap, tb_complete=True, tb_complete_gate_sec=45.0,
         complete_budget=complete_budget, tb_sell_naked=tb_sell_naked,
+        tb_complete_continuous=tb_complete_continuous,
         inv_reconcile_grace_sec=12.0, dry_run=False,
     )
     r.state = TradingState()
@@ -104,7 +105,7 @@ def _make_runner(ctl, fok_fills=True, per_window_cap=15.0, complete_budget=0.0,
     return r
 
 
-def _run(ctl, runner, n_ticks, monkeypatch, up=(0.50, 0.99), dn=(0.01, 0.45)):
+def _run(ctl, runner, n_ticks, monkeypatch, up=(0.50, 0.99), dn=(0.01, 0.45), t_after=40.0):
     class _Cl:
         async def __aenter__(self):
             return self
@@ -118,7 +119,7 @@ def _run(ctl, runner, n_ticks, monkeypatch, up=(0.50, 0.99), dn=(0.01, 0.45)):
     async def fake_sleep(_):
         ctl.tick += 1
         ctl.clock += ctl.dt
-        ctl.t_remaining = 40.0
+        ctl.t_remaining = t_after                 # 40 = near-end; >45 keeps it mid-window
         if ctl.tick >= n_ticks:
             runner._shutdown = True
 
@@ -177,6 +178,29 @@ def test_budget_headroom_closes_cap_frozen_naked(monkeypatch):
     _run(ctl, runner, 2, monkeypatch)
     assert _fok_buys(ctl, "DN") and _fok_buys(ctl, "DN")[0][3] == 5.0
     assert runner.state.naked_shares == 0
+
+
+def test_continuous_completion_fires_before_near_end(monkeypatch):
+    # tb_complete_continuous: complete a profitable (<$1) naked leg MID-window (t_remaining 100
+    # > the 45s gate), not just near-end -> minimizes time spent naked (direction-neutral).
+    ctl = _Ctl()
+    ctl.t_remaining = 100.0
+    ctl.dt = 2.0                                         # realistic 2s cadence (WITHIN old grace)
+    runner = _make_runner(ctl, tb_complete_continuous=True)
+    _run(ctl, runner, 3, monkeypatch, t_after=100.0)     # never reaches near-end
+    # no feed-lag grace in top_book -> a fresh same-side naked completes EVERY tick, not throttled
+    assert len(_fok_buys(ctl, "DN")) >= 2, "continuous completion throttled by phantom grace"
+    assert runner.state.naked_shares == 0
+
+
+def test_no_continuous_completion_leaves_naked_mid_window(monkeypatch):
+    # WITHOUT the flag, a mid-window naked is NOT completed (only near-end) -> rides for now.
+    ctl = _Ctl()
+    ctl.t_remaining = 100.0
+    runner = _make_runner(ctl, tb_complete_continuous=False)
+    _run(ctl, runner, 2, monkeypatch, t_after=100.0)
+    assert not _fok_buys(ctl, "DN")                       # no completion mid-window
+    assert runner.state.naked_shares == 5
 
 
 def test_trend_sells_loser_when_pair_over_dollar(monkeypatch):

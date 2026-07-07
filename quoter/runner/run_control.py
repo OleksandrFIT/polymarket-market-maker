@@ -53,13 +53,18 @@ if STRATEGY == "top_book":
     _early_sec = 0.0 if _REGIME else 60.0
     _early_size = min(0.0 if _REGIME else 10.0, _cap)   # size > cap => skew_ok blocks ALL early
     #                                                     quotes (silent no-quote) — clamp to cap
+    # neutral leans into "always paired": merge EVERY pair immediately (recycle capital, like
+    # 0xb27b) + complete profitable naked continuously (minimize time naked). SELL stays near-end.
+    _merge_min = 5.0 if _REGIME else 1.0
+    _continuous = not _REGIME
     CFG = Config(
         strategy="top_book", assets=("BTC",), timeframes=("5m",),
-        tb_size=5.0, tb_naked_cap=_cap, tb_tick=0.001, tb_merge_min=5.0,
+        tb_size=5.0, tb_naked_cap=_cap, tb_tick=0.001, tb_merge_min=_merge_min,
         requote_sec=_REQUOTE_SEC,
         regime_gate=_REGIME, regime_max_move_usd=25.0, regime_lookback_min=5,
         tb_early_sec=_early_sec, tb_early_size=_early_size,   # neutral: pair both legs early
         tb_complete=True, tb_complete_gate_sec=45.0,   # close naked pairs near window-end
+        tb_complete_continuous=_continuous,            # neutral: complete <$1 legs all window
         complete_budget=6.0, tb_sell_naked=True,       # self-funding headroom; SELL loser in trend
         tb_link_margin=0.01,                           # linked-pair quoting: pairs < $1 by construction
         per_window_cap=15.0, per_market_cap_usd=15.0, min_time_to_expiry_sec=5.0,

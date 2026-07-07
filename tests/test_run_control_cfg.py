@@ -82,6 +82,8 @@ def test_top_book_neutral_mode_via_env():
         assert rc.CFG.tb_early_sec == 60.0    # early-aggressive both-sided pairing on
         assert rc.CFG.tb_early_size == 10.0
         assert rc.CFG.tb_naked_cap == 12.0    # bigger cap so early size 10 passes skew_ok
+        assert rc.CFG.tb_merge_min == 1.0     # merge EVERY pair immediately (recycle capital)
+        assert rc.CFG.tb_complete_continuous is True  # complete <$1 legs all window (min naked)
         assert rc.CFG.tb_link_margin == 0.01  # neutral keeps linked-pair + completion + SELL
         assert rc.CFG.tb_sell_naked is True
         assert rc.CFG.dry_run is True         # neutral NEVER lifts the live lock
@@ -93,6 +95,7 @@ def test_top_book_default_is_gated_not_neutral():
     os.environ.pop("REGIME_GATE", None)
     rc = _load_rc("top_book")
     assert rc.CFG.regime_gate is True and rc.CFG.tb_early_sec == 0.0  # unchanged default
+    assert rc.CFG.tb_merge_min == 5.0 and rc.CFG.tb_complete_continuous is False  # default unchanged
 
 
 def test_top_book_requote_sec_from_env():
