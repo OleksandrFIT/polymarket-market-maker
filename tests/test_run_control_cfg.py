@@ -68,9 +68,31 @@ def test_top_book_cfg_is_dry_run_by_default():
     assert c.tb_complete is True              # near-end pair completion (zero naked residual)
     assert c.tb_complete_gate_sec == 45.0
     assert c.tb_link_margin == 0.01           # linked-pair quoting (pairs < $1 by construction)
+    assert c.tb_early_sec == 0.0              # default mode: no early-aggressive phase (unchanged)
     assert c.complete_budget == 6.0           # self-funding headroom above the $15 maker cap
     assert c.tb_sell_naked is True            # SELL the loser when pair >= $1 (trend), not ride
     assert c.per_window_cap == 15.0           # проба-пера cap
+
+
+def test_top_book_neutral_mode_via_env():
+    os.environ["REGIME_GATE"] = "0"
+    try:
+        rc = _load_rc("top_book")
+        assert rc.CFG.regime_gate is False    # DIRECTION-NEUTRAL: trade EVERY window
+        assert rc.CFG.tb_early_sec == 60.0    # early-aggressive both-sided pairing on
+        assert rc.CFG.tb_early_size == 10.0
+        assert rc.CFG.tb_naked_cap == 12.0    # bigger cap so early size 10 passes skew_ok
+        assert rc.CFG.tb_link_margin == 0.01  # neutral keeps linked-pair + completion + SELL
+        assert rc.CFG.tb_sell_naked is True
+        assert rc.CFG.dry_run is True         # neutral NEVER lifts the live lock
+    finally:
+        os.environ.pop("REGIME_GATE", None)
+
+
+def test_top_book_default_is_gated_not_neutral():
+    os.environ.pop("REGIME_GATE", None)
+    rc = _load_rc("top_book")
+    assert rc.CFG.regime_gate is True and rc.CFG.tb_early_sec == 0.0  # unchanged default
 
 
 def test_top_book_requote_sec_from_env():

@@ -112,6 +112,10 @@ class Config:
     tb_tick: float = 0.001        # price-improvement tick over best bid
     tb_merge_min: float = 5.0     # merge matched pairs once min(inv) >= this
     requote_sec: float = 2.0      # top_book re-quote cadence (read book + adjust); env REQUOTE_SEC
+    # direction-neutral mode: trade EVERY window (regime_gate off), pair both legs early &
+    # aggressively so merges neutralize direction (like the profitable competitor 0xb27b)
+    tb_early_sec: float = 0.0     # first this-many sec of the window = "early" phase (0 = off)
+    tb_early_size: float = 0.0    # quote size during the early phase (0 = use tb_size)
     # regime gate: pair-maker only enters CALM windows (skips trends; earns in chop)
     regime_gate: bool = False     # enable auto skip-trending-windows for top_book
     regime_max_move_usd: float = 25.0   # net BTC move over lookback above this = trend = skip

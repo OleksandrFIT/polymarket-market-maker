@@ -40,11 +40,25 @@ if STRATEGY == "top_book":
             _REQUOTE_SEC = 2.0
     except (TypeError, ValueError):
         _REQUOTE_SEC = 2.0
+    # REGIME_GATE=0 -> DIRECTION-NEUTRAL mode (trade EVERY window like 0xb27b: gate off +
+    # early-aggressive both-sided pairing so merges neutralize direction). Default (unset/1)
+    # keeps the calm-only regime gate. Neutral relies on linked-pair + merge + completion/SELL
+    # to stay balanced; naked risk in trends is the known unverified-without-live trade-off.
+    _REGIME = os.environ.get("REGIME_GATE", "1") != "0"
+    # neutral mode needs a bigger naked cap: skew_ok limits a single order to <= cap, and a
+    # merge-maker holds more (balanced) inventory to pair up. Higher cap = more naked risk in a
+    # trend (the trade-off of trading every window) — watchdog naked tripwire must be raised
+    # before any neutral LIVE run (it's tuned to 8 for cap 6; dry-run doesn't use it).
+    _cap = 6.0 if _REGIME else 12.0
+    _early_sec = 0.0 if _REGIME else 60.0
+    _early_size = min(0.0 if _REGIME else 10.0, _cap)   # size > cap => skew_ok blocks ALL early
+    #                                                     quotes (silent no-quote) — clamp to cap
     CFG = Config(
         strategy="top_book", assets=("BTC",), timeframes=("5m",),
-        tb_size=5.0, tb_naked_cap=6.0, tb_tick=0.001, tb_merge_min=5.0,
+        tb_size=5.0, tb_naked_cap=_cap, tb_tick=0.001, tb_merge_min=5.0,
         requote_sec=_REQUOTE_SEC,
-        regime_gate=True, regime_max_move_usd=25.0, regime_lookback_min=5,  # skip trends
+        regime_gate=_REGIME, regime_max_move_usd=25.0, regime_lookback_min=5,
+        tb_early_sec=_early_sec, tb_early_size=_early_size,   # neutral: pair both legs early
         tb_complete=True, tb_complete_gate_sec=45.0,   # close naked pairs near window-end
         complete_budget=6.0, tb_sell_naked=True,       # self-funding headroom; SELL loser in trend
         tb_link_margin=0.01,                           # linked-pair quoting: pairs < $1 by construction

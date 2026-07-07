@@ -881,8 +881,16 @@ class MergeRunner:
                     # is try/excepted like the book GETs: one transient API error must
                     # not abort the window; the finally cancel_all stays the backstop.
                     try:
+                        # EARLY-AGGRESSIVE (direction-neutral mode): in the first tb_early_sec
+                        # of the 5m window, quote a bigger size to pair BOTH legs fast while the
+                        # market is near 0.50 (before a trend develops), so merges neutralize
+                        # direction. tb_early_size=0 -> normal size (feature off).
+                        early = (self.cfg.tb_early_sec > 0
+                                 and m.time_remaining() > (300.0 - self.cfg.tb_early_sec))
+                        qsize = (self.cfg.tb_early_size if (early and self.cfg.tb_early_size > 0)
+                                 else self.cfg.tb_size)
                         target = plan_top_book(by, bn, inv["Up"], inv["Down"],
-                                               self.cfg.tb_naked_cap, self.cfg.tb_size, self.cfg.tb_tick)
+                                               self.cfg.tb_naked_cap, qsize, self.cfg.tb_tick)
                         # LINKED-PAIR: cap the light-side bid so any pairing fill stays < $1
                         # (avg = held per-share cost, correct across merges). Off when margin=0.
                         avg = {s: (held_cost[s] / inv[s] if inv[s] > 0 else None)

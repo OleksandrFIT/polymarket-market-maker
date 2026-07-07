@@ -12,6 +12,8 @@
 # Baseline = first reading (delete live_watch_base.txt to reset).
 LIMIT=-10.0
 DD_NEEDED=2                                   # consecutive equity-dd breaches before stop
+NAKED_LIMIT=${NAKED_LIMIT:-8}                 # naked tripwire: cap(6)+2 default; set 14 for
+#                                               DIRECTION-NEUTRAL mode (cap 12) or it false-fires
 BASE_F=/home/ubuntu/live_watch_base.txt
 LOG=/home/ubuntu/poly-quoter/logs/control.log
 MF_BASE=$(grep -c merge_failed "$LOG" 2>/dev/null || echo 0)   # merges failed BEFORE we started
@@ -68,7 +70,7 @@ PYEOF
   echo "$(date -u +%T) mode=$MODE equity=$TOTAL (pUSD=$PUSD usdce=$USDCE posval=\$$POSVAL) dd=$DD (x$DD_COUNT) naked=$NAKED merge_fails=$MF"
   BREACH=""
   [ "$DD_COUNT" -ge "$DD_NEEDED" ] && BREACH="equity dd<$LIMIT x$DD_COUNT"
-  [ "${NAKED:-0}" -gt 8 ] 2>/dev/null && BREACH="naked>8"
+  [ "${NAKED:-0}" -gt "$NAKED_LIMIT" ] 2>/dev/null && BREACH="naked>$NAKED_LIMIT"
   [ "${MF:-0}" -ge 2 ] 2>/dev/null && BREACH="merge_failed x$MF"
   if [ -n "$BREACH" ] && [ "$MODE" = "RUNNING" ]; then
     echo "$(date -u +%T) *** BREACH: $BREACH -> FORCE STOP ***"
