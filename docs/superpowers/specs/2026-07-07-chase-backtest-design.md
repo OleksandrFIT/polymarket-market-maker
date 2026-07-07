@@ -116,3 +116,33 @@ and the "trade every window like 0xb27b" idea is closed as not replicable maker-
 - `scripts/_chase.py` (or extend `_top_book.py`) with Units 1–3.
 - `tests/test_chase_signal.py`.
 - A results summary (passive vs chase across ≥3 days) written back here or to a results note.
+
+---
+
+## Results (2026-07-07) — CHASE REJECTED
+
+Ran `scripts/_chase.py` on ~74-window slices of three separate resolved days.
+
+| Day | passive edge (fee 0) | best chase edge (fee 0) | passive @0.2c | chase @0.2c | passive adverse | chase adverse |
+|---|---|---|---|---|---|---|
+| Jul 2 | **+0.90%** | +0.40% | **+0.50%** | +0.01% | 0.9 | 0.5 |
+| Jul 3 | **+1.19%** | +0.08% | **+0.79%** | −0.31% | 1.1 | 1.4 |
+| Jul 4 | **+0.68%** | +0.09% | **+0.28%** | −0.41% | 1.4 | 1.0 |
+
+**Verdict against the decision rule:**
+1. best chase edge > passive edge net of fee — **FAILS all 3 days** (chase edge is below passive
+   at every day and every fee; at 0.2c fee chase is ~breakeven-to-negative while passive stays
+   +0.28…+0.79%).
+2. chase adverse < passive adverse — **inconsistent** (lower on Jul 2/4, HIGHER on Jul 3).
+3. robustness — chase never beats passive, so moot.
+
+**Conclusion:** the momentum chase reduces adverse residual on some days but pays too much (buys
+the winner at its ask) to be worth it — net worse than passive on every day. **Chase is closed.**
+
+**What this DOES establish (the real deliverable):** the PASSIVE gated top-of-book maker is a
+robust, backtested **+EV strategy on real book data — +0.68% / +0.90% / +1.19% across 3 days
+(avg ~+0.92%)**, staying positive until ~0.4c/share fee. That IS the current gated default
+(size 5, cap 6, skip trends, linked-pair). 0xb27b's every-window edge is NOT a chase signal we
+were missing — it is execution quality (fill speed/volume, continuous merge at scale) we cannot
+replicate maker-side. **Recommendation: run the passive gated default; verify the real maker fee
+is < ~0.4c before any live; do NOT pursue chase or aggressive/neutral every-window quoting.**
