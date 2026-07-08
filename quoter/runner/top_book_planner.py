@@ -131,3 +131,11 @@ def committed_gate(cost_up: float, cost_dn: float, resting: dict,
     """
     committed = cost_up + cost_dn + sum(p * sz for (p, sz) in resting.values())
     return committed + quote.price * quote.size < cap
+
+
+def taker_fee(price: float, rate: float = 0.018) -> float:
+    """Polymarket crypto TAKER fee per share: `rate * min(price, 1-price)` — peaks at 0.50
+    (~0.9c at rate 1.8%) and falls to ~0 at the 0/1 extremes. 0xb27b trades at the extremes
+    precisely to minimise this. Maker fills pay 0 and never call this."""
+    p = min(max(price, 0.0), 1.0)
+    return rate * min(p, 1.0 - p)
