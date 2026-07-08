@@ -38,7 +38,8 @@ from quoter.runner.tilt_planner import plan_tilt
 from quoter.runner.regime_tracker import RegimeTracker
 from quoter.runner.five_min_planner import plan_five_min
 from quoter.runner.top_book_planner import (
-    plan_top_book, diff_quotes, plan_merge, committed_gate, skew_ok, link_pair_bids)
+    plan_top_book, diff_quotes, plan_merge, committed_gate, skew_ok, link_pair_bids, taker_fee)
+from quoter.research.chase import chase_signal
 from quoter.runner.regime_gate import regime_tradeable
 from quoter.runner.paper_fill import PaperBook
 from quoter.strategy.ladder import compute_ladder
@@ -296,6 +297,8 @@ class MergeRunner:
                                 log.info("regime_skip", slug=m.slug)
                             else:
                                 await self._top_book_window(m, mid)
+                        elif self.cfg.strategy == "momentum":
+                            await self._momentum_window(m, mid)
                         elif self.cfg.strategy == "five_min":
                             await self._five_min_window(m, mid)
                         elif self.requote and self.cfg.rungs > 1:
@@ -1083,6 +1086,99 @@ class MergeRunner:
         log.info("topbook_done", slug=m.slug, merged=merged,
                  inv_up=inv["Up"], inv_dn=inv["Down"],
                  spent=round(cost["Up"] + cost["Down"], 2), committed=round(committed, 2))
+
+    async def _momentum_window(self, m, mid_at_entry: float) -> None:
+        """Momentum-take (phase-28, 0xb27b decode): when a side has upward momentum, TAKE it
+        (mover=winner) at its ask chasing up to mom_chase_max, and TAKE the fader (loser) cheap
+        at its ask, both FOK; merge matched pairs each tick (floor); keep the net-long-mover
+        residual capped at mom_residual_cap and ride it to resolution; NEVER sell. Taker spend
+        (incl. taker_fee) bounded by per_window_cap. Live-execution glue — operator-gated."""
+        self._traded_windows.add(m.open_ts)
+        self.state.windows_traded += 1
+        self.state.last_window = m.slug
+        self.state.last_event = f"momentum {m.slug}"
+        self.state.fills_window = 0.0
+        self.state.matched_pct = 0.0
+        log.info("momentum_enter", slug=m.slug, mid=round(mid_at_entry, 3))
+        inv = {"Up": 0.0, "Down": 0.0}
+        cost = {"Up": 0.0, "Down": 0.0}
+        held_cost = {"Up": 0.0, "Down": 0.0}
+        merged = 0.0
+        tok = {"Up": m.yes_token, "Down": m.no_token}
+        mid_hist: list[tuple[float, float]] = []
+        cadence = self.cfg.requote_sec
+        try:
+            async with httpx.AsyncClient(timeout=8) as cl:
+                while m.time_remaining() > END_BUFFER_SEC and not self._shutdown:
+                    if self.state.drain_force_stop():
+                        await self.cancel_all()
+                        return
+                    try:
+                        by = (await cl.get("https://clob.polymarket.com/book", params={"token_id": tok["Up"]})).json()
+                        bn = (await cl.get("https://clob.polymarket.com/book", params={"token_id": tok["Down"]})).json()
+                    except Exception:
+                        await asyncio.sleep(cadence)
+                        continue
+                    try:
+                        bbu = _best(by, "bids")
+                        bau = _best(by, "asks")
+                        if bbu is not None and bau is not None:
+                            mid_hist.append((monotonic(), (bbu + bau) / 2))
+                        sig = chase_signal(mid_hist, monotonic(),
+                                           self.cfg.mom_lookback, self.cfg.mom_threshold)
+                        if sig is not None and not self.cfg.dry_run:
+                            mover = sig
+                            fader = "Down" if sig == "Up" else "Up"
+                            for side in (mover, fader):
+                                other = "Down" if side == "Up" else "Up"
+                                ask = _best(by if side == "Up" else bn, "asks")
+                                if ask is None or ask <= 0 or ask >= 0.99:
+                                    continue
+                                if side == mover and ask > self.cfg.mom_chase_max:
+                                    continue
+                                if inv[side] - inv[other] >= self.cfg.mom_residual_cap:
+                                    continue
+                                unit = self.cfg.tb_size * (ask + taker_fee(ask))
+                                if cost["Up"] + cost["Down"] + unit > self.cfg.per_window_cap:
+                                    continue
+                                r = await self._place_limit(token_id=tok[side], price=ask,
+                                                            size=self.cfg.tb_size, side="BUY",
+                                                            post_only=False, order_type="FOK")
+                                filled = (self._order_matched(r["order_id"])
+                                          if (r and r.get("order_id")) else None)
+                                if filled:
+                                    c = filled * (ask + taker_fee(ask))
+                                    inv[side] += filled
+                                    cost[side] += c
+                                    held_cost[side] += c
+                                    log.info("momentum_take", side=side, mover=(side == mover),
+                                             price=round(ask, 3), size=filled)
+                        mq = plan_merge(inv["Up"], inv["Down"], self.cfg.tb_merge_min)
+                        if mq > 0 and not self.cfg.dry_run:
+                            ok = await self._merge_pairs(m, mq)
+                            if ok:
+                                for s in ("Up", "Down"):
+                                    avg_s = held_cost[s] / inv[s] if inv[s] > 0 else 0.0
+                                    held_cost[s] = max(0.0, held_cost[s] - mq * avg_s)
+                                    inv[s] -= mq
+                                    if inv[s] <= 0:
+                                        inv[s] = 0.0
+                                        held_cost[s] = 0.0
+                                merged += mq
+                                self.state.merged_today += mq
+                        self.state.pairs_caught = int(min(inv["Up"], inv["Down"]))
+                        self.state.naked_shares = int(abs(inv["Up"] - inv["Down"]))
+                        self.state.fills_window = inv["Up"] + inv["Down"] + 2 * merged
+                        self.state.matched_pct = (100 * 2 * merged
+                                                  / max(self.state.fills_window, 1e-9))
+                    except Exception as e:
+                        log.warning("momentum_tick_err", error=str(e))
+                    await asyncio.sleep(cadence)
+        finally:
+            await self.cancel_all()
+        log.info("momentum_done", slug=m.slug, merged=merged,
+                 inv_up=inv["Up"], inv_dn=inv["Down"],
+                 spent=round(cost["Up"] + cost["Down"], 2))
 
     async def _redeem_sweeper(self) -> None:
         """Every 60s: redeem resolved positions so capital returns to cash, then wrap
