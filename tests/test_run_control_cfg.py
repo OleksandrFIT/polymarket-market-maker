@@ -128,3 +128,25 @@ def test_top_book_live_go_lifts_lock_only_here():
         assert rc5.CFG.dry_run is True
     finally:
         os.environ.pop("LIVE_GO", None)
+
+
+def test_momentum_cfg_is_dry_run_by_default():
+    os.environ.pop("LIVE_GO", None)
+    rc = _load_rc("momentum")
+    c = rc.CFG
+    assert c.dry_run is True               # LIVE DISABLED without LIVE_GO
+    assert c.strategy == "momentum"
+    assert c.timeframes == ("5m",)
+    assert c.tb_size == 5.0
+    assert c.mom_residual_cap == 5.0
+    assert c.mom_chase_max == 0.95
+    assert c.per_window_cap == 15.0
+
+
+def test_momentum_live_go_lifts_lock():
+    os.environ["LIVE_GO"] = "1"
+    try:
+        assert _load_rc("momentum").CFG.dry_run is False
+        assert _load_rc("five_min").CFG.dry_run is True   # others stay locked
+    finally:
+        os.environ.pop("LIVE_GO", None)

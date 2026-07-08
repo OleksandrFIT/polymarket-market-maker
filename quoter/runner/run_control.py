@@ -70,6 +70,18 @@ if STRATEGY == "top_book":
         per_window_cap=15.0, per_market_cap_usd=15.0, min_time_to_expiry_sec=5.0,
         dry_run=not _LIVE_GO,            # LIVE only via explicit LIVE_GO=1
     )
+elif STRATEGY == "momentum":
+    # 0xb27b decode: taker-chase the momentum side at extremes + cheap fader + merge floor +
+    # small capped directional residual, never sell. LIVE only via LIVE_GO=1 (momentum only).
+    _LIVE_GO = os.environ.get("LIVE_GO") == "1"
+    _REQUOTE_SEC = 2.0
+    CFG = Config(
+        strategy="momentum", assets=("BTC",), timeframes=("5m",),
+        tb_size=5.0, tb_tick=0.001, tb_merge_min=1.0, requote_sec=_REQUOTE_SEC,
+        mom_lookback=30.0, mom_threshold=0.03, mom_chase_max=0.95, mom_residual_cap=5.0,
+        per_window_cap=15.0, per_market_cap_usd=15.0, min_time_to_expiry_sec=5.0,
+        dry_run=not _LIVE_GO,
+    )
 elif STRATEGY == "five_min":
     CFG = Config(
         strategy="five_min", assets=("BTC",), timeframes=("5m",),
@@ -91,8 +103,8 @@ else:
         dry_run=True,                    # LIVE DISABLED
     )
 assert CFG.dry_run is True or (
-    CFG.strategy == "top_book" and os.environ.get("LIVE_GO") == "1"
-), "LIVE TRADING DISABLED: CFG.dry_run must stay True (top_book live needs LIVE_GO=1)"
+    CFG.strategy in ("top_book", "momentum") and os.environ.get("LIVE_GO") == "1"
+), "LIVE TRADING DISABLED: CFG.dry_run must stay True (top_book/momentum live needs LIVE_GO=1)"
 # Use continuous re-quoting (active two-sided market making) when trading.
 REQUOTE = True
 

@@ -130,6 +130,12 @@ class Config:
     tb_complete_continuous: bool = False  # complete profitable (<$1) naked ALL window, not just near-end
     tb_sell_naked: bool = False         # when pair >= $1 (trend), SELL the loser instead of riding
 
+    # ── phase-28 momentum-take strategy (0xb27b decode: chase mover + merge floor) ──
+    mom_lookback: float = 30.0       # sec of mid history for the causal momentum signal
+    mom_threshold: float = 0.03      # mid move over lookback to trigger a chase
+    mom_chase_max: float = 0.95      # never take the mover above this price
+    mom_residual_cap: float = 5.0    # max net directional exposure (mover inv - fader inv)/window
+
     # ── Quoter loop (Phase-9 faster cycle) ──
     requote_min_interval_ms: int = 50   # was 100 → 2× faster cycle
     requote_on_mid_move_cents: int = 1
