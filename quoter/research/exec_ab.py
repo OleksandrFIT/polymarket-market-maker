@@ -165,3 +165,57 @@ def momentum_window(snaps, tape, winner, slug, size=5.0, lookback=30, threshold=
         merged, merged_cost = _merge(inv, held, merged, merged_cost)
     return window_record("momentum", slug, merged, merged_cost, inv["Up"], inv["Down"],
                          winner, spent)
+
+
+def hybrid_window(snaps, tape, winner, slug, cap=6.0, size=5.0, lookback=30, threshold=0.03,
+                  resid_cap=8.0, pwc=15.0):
+    """0xb27b's ~53/47 replica: MAKER bids on both sides catch the cheap FALLER (shadow-fill vs
+    SELL prints <= our bid) + TAKER chases the rising WINNER EVERY tick from early (average in at a
+    low basis), merge continuously, never sell. Residual leans the winner (fair coin)."""
+    st = {0: [t for t in tape if t["oi"] == 0 and t["side"] == "SELL"],
+          1: [t for t in tape if t["oi"] == 1 and t["side"] == "SELL"]}
+    oi = {"Up": 0, "Down": 1}
+    inv = {"Up": 0.0, "Down": 0.0}
+    held = {"Up": 0.0, "Down": 0.0}
+    spent = merged = merged_cost = 0.0
+    mid_hist = []
+    for i, snap in enumerate(snaps):
+        ts = snap["ts"]
+        end = snaps[i + 1]["ts"] if i + 1 < len(snaps) else ts + 2
+        book = {"Up": snap["yes"], "Down": snap["no"]}
+        m = _mid(snap["yes"])
+        if m is not None:
+            mid_hist.append((ts, m))
+        # MAKER: rest best+tick both sides, shadow-fill vs SELL prints <= our bid (cheap faller)
+        for side in ("Up", "Down"):
+            other = "Down" if side == "Up" else "Up"
+            b = book[side]
+            if not b["bids"] or inv[side] - inv[other] >= cap:
+                continue
+            bb = max(float(p) for p, _ in b["bids"])
+            ba, _sz = _ask(b)
+            our = round(bb + TICK, 3)
+            if ba is None or our >= ba or our >= 0.99 or our <= 0:
+                continue
+            v = sum(t["size"] for t in st[oi[side]] if ts <= t["ts"] < end and t["price"] <= our)
+            f = min(size, v)
+            if f > 0 and spent + f * our <= pwc:
+                inv[side] += f
+                held[side] += f * our
+                spent += f * our
+        # TAKER: chase the rising winner EVERY tick (continuous early averaging-in)
+        sig = chase_signal(mid_hist, ts, lookback, threshold)
+        if sig is not None:
+            other = "Down" if sig == "Up" else "Up"
+            if inv[sig] - inv[other] < resid_cap:
+                ap, asz = _ask(book[sig])
+                if ap is not None and 0 < ap < 0.99:
+                    f = min(size, asz)
+                    unit = f * (ap + fee(ap))
+                    if f > 0 and spent + unit <= pwc:
+                        inv[sig] += f
+                        held[sig] += f * ap
+                        spent += unit
+        merged, merged_cost = _merge(inv, held, merged, merged_cost)
+    return window_record("hybrid", slug, merged, merged_cost, inv["Up"], inv["Down"],
+                         winner, spent)

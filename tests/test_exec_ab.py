@@ -1,5 +1,6 @@
 """Pure execution-A/B functions: window_record metric + the two per-window portfolios."""
-from quoter.research.exec_ab import window_record, top_book_window, momentum_window
+from quoter.research.exec_ab import (
+    window_record, top_book_window, momentum_window, hybrid_window)
 
 
 def test_window_record_fully_paired():
@@ -72,4 +73,30 @@ def test_momentum_window_taker_chase_pair_over_dollar():
     assert r["style"] == "momentum"
     assert r["pairs_merged"] == 5.0
     assert abs(r["pair_cost"] - 1.04) < 1e-9
+    assert r["naked_resid"] == 0.0
+
+
+def test_hybrid_window_takes_the_rising_winner():
+    # rising Up (0.50->0.60), empty tape -> only the taker leg fires -> accumulate Up (winner)
+    # -> naked +5 Up, winner Up -> WON (fair-coin-winner behaviour, not the loser).
+    slug = "btc-updown-5m-1000000000"
+    snaps = [_snap(1000000000, 0.48, 0.52, 0.48, 0.52),
+             _snap(1000000005, 0.58, 0.62, 0.38, 0.42)]
+    r = hybrid_window(snaps, tape=[], winner="Up", slug=slug)
+    assert r["style"] == "hybrid"
+    assert r["naked_resid"] == 5.0
+    assert r["resid_outcome"] == "WON"
+    assert r["pairs_merged"] == 0.0
+
+
+def test_hybrid_window_pairs_maker_loser_with_taker_winner():
+    # rising Up + a cheap Down SELL print: taker takes Up (winner), maker catches Down (cheap
+    # loser), merge -> a matched pair (the hybrid 53/47 pairing).
+    slug = "btc-updown-5m-1000000000"
+    snaps = [_snap(1000000000, 0.48, 0.52, 0.48, 0.52),
+             _snap(1000000005, 0.58, 0.62, 0.10, 0.14)]
+    tape = [{"oi": 1, "side": "SELL", "price": 0.10, "size": 5.0, "ts": 1000000005}]
+    r = hybrid_window(snaps, tape, "Up", slug)
+    assert r["style"] == "hybrid"
+    assert r["pairs_merged"] == 5.0
     assert r["naked_resid"] == 0.0
