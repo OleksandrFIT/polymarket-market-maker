@@ -168,3 +168,15 @@ def test_naked_residual_outcome_and_none_pair_cost(monkeypatch):
     assert fq["naked_resid"] == 5.0
     assert fq["match_naked"] == 0.0
     assert fq["resid_outcome"] == "WON"
+
+
+def test_naked_residual_losing_side_is_lost(monkeypatch):
+    # naked +5 Up, but Up book (0.01/0.05) -> mid 0.03 < 0.5 -> winner Down -> naked Up != winner -> LOST.
+    ctl = _Ctl()
+    runner = _make_runner(ctl, fok_fills=False)
+    events = _capture(monkeypatch)
+    _run(ctl, runner, 2, monkeypatch, up=(0.01, 0.05), dn=(0.90, 0.95))
+    fq = _fq(events)
+    assert fq["pairs_merged"] == 0.0
+    assert fq["naked_resid"] == 5.0
+    assert fq["resid_outcome"] == "LOST"
