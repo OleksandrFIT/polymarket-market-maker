@@ -9,7 +9,7 @@ import collections
 
 from quoter.research.mm_tape import load_window
 from quoter.research.pairquality import summarize
-from quoter.research.exec_ab import top_book_window, momentum_window
+from quoter.research.exec_ab import top_book_window, momentum_window, hybrid_window
 
 BOOK = sys.argv[1] if len(sys.argv) > 1 else "/tmp/book_all.jsonl"
 
@@ -45,7 +45,7 @@ def _row(name, recs):
 
 def main():
     byslug = _load(BOOK)
-    tb, mo = [], []
+    tb, mo, hy = [], [], []
     for slug, snaps in byslug.items():
         w = load_window(slug)
         if not w or not w[0]:
@@ -53,14 +53,16 @@ def main():
         _tape, winner, _ = w
         tb.append(top_book_window(snaps, _tape, winner, slug))
         mo.append(momentum_window(snaps, _tape, winner, slug))
+        hy.append(hybrid_window(snaps, _tape, winner, slug))
     if not tb:
         print("no resolved windows in tape (need network/cache to resolve winners via load_window)")
         return
     print("windows: %d (same tape, same resolved winners)\n" % len(tb))
-    print("FIDELITY: momentum = taker, decision-grade | top_book = maker, OPTIMISTIC shadow-fill")
-    print("          (offline can't model adverse selection; top_book pair_cost is a BEST CASE)\n")
+    print("FIDELITY: momentum/hybrid taker legs = decision-grade | maker legs = OPTIMISTIC shadow-fill")
+    print("          (offline can't model adverse selection on the maker fills)\n")
     print(_row("top_book (maker, OPTIMISTIC)", tb))
     print(_row("momentum (taker, real)", mo))
+    print(_row("hybrid (0xb27b 53/47 replica)", hy))
 
 
 if __name__ == "__main__":
