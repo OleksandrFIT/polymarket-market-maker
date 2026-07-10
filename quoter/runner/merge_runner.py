@@ -865,6 +865,10 @@ class MergeRunner:
         resting: dict[str, tuple[float, float]] = {}   # side -> (price, size)
         oids: dict[str, list[str]] = {"Up": [], "Down": []}
         merged = 0.0
+        merged_cost = 0.0                  # realized $ cost basis of merged pairs (-> pair_cost)
+        completes = 0                      # count of filled completion FOKs
+        sells = 0                          # count of filled sell-naked FOKs
+        last_mid = mid_at_entry            # last observed Up mid (winner proxy at window end)
         tok = {"Up": m.yes_token, "Down": m.no_token}
         cadence = self.cfg.requote_sec   # re-quote cadence (env REQUOTE_SEC; 2s default, 1s A/B)
         try:
@@ -879,6 +883,13 @@ class MergeRunner:
                     except Exception:
                         await asyncio.sleep(cadence)
                         continue
+                    try:                       # winner proxy for the fillquality summary
+                        _bb = max((float(x["price"]) for x in by.get("bids", [])), default=None)
+                        _ba = min((float(x["price"]) for x in by.get("asks", [])), default=None)
+                        if _bb is not None or _ba is not None:
+                            last_mid = _ba if _bb is None else (_bb if _ba is None else (_bb + _ba) / 2)
+                    except Exception:
+                        pass
                     # The whole mutate section (cancels + posts + fill-credit + merge)
                     # is try/excepted like the book GETs: one transient API error must
                     # not abort the window; the finally cancel_all stays the backstop.
@@ -1026,6 +1037,7 @@ class MergeRunner:
                                         held_cost[light] += filled * light_ask
                                         log.info("topbook_complete", side=light, qty=filled,
                                                  price=round(light_ask, 3))
+                                        completes += 1
                                 elif near_end and self.cfg.tb_sell_naked and heavy_bid and heavy_bid > 0:
                                     # pair >= $1 (market moved against us / trend): completing
                                     # would BUY the winner at a premium and lock a bigger loss.
@@ -1049,6 +1061,7 @@ class MergeRunner:
                                             held_cost[heavy] = 0.0
                                         log.info("topbook_sell_naked", side=heavy, qty=sold,
                                                  price=round(heavy_bid, 3))
+                                        sells += 1
                         # merge matched pairs (committed `cost` NOT reduced; held_cost IS, to
                         # keep per-share avg correct). Near-end merge ANY complete pair (min 1)
                         # so a just-completed sub-tb_merge_min pair doesn't ride unmerged.
@@ -1057,6 +1070,9 @@ class MergeRunner:
                         if mq > 0:
                             ok = await self._merge_pairs(m, mq)   # dry_run -> logs intent, True
                             if ok:
+                                avg_up = held_cost["Up"] / inv["Up"] if inv["Up"] > 0 else 0.0
+                                avg_dn = held_cost["Down"] / inv["Down"] if inv["Down"] > 0 else 0.0
+                                merged_cost += mq * (avg_up + avg_dn)
                                 for s in ("Up", "Down"):
                                     avg_s = held_cost[s] / inv[s] if inv[s] > 0 else 0.0
                                     held_cost[s] = max(0.0, held_cost[s] - mq * avg_s)
@@ -1082,6 +1098,19 @@ class MergeRunner:
                     await asyncio.sleep(cadence)
         finally:
             await self.cancel_all()
+        naked = inv["Up"] - inv["Down"]
+        win = "Up" if last_mid >= 0.5 else "Down"
+        resid_outcome = ("flat" if abs(naked) < 1e-9
+                         else "WON" if ((naked > 0) == (win == "Up")) else "LOST")
+        match_naked = (merged / abs(naked)) if abs(naked) >= 1e-9 else None
+        log.info("topbook_fillquality", slug=m.slug,
+                 pair_cost=round(merged_cost / merged, 4) if merged > 0 else None,
+                 pairs_merged=merged,
+                 naked_resid=round(naked, 1),
+                 resid_outcome=resid_outcome,
+                 match_naked=round(match_naked, 1) if match_naked is not None else None,
+                 completes=completes, sells=sells,
+                 spent=round(cost["Up"] + cost["Down"], 2))
         committed = cost["Up"] + cost["Down"] + sum(p * sz for (p, sz) in resting.values())
         log.info("topbook_done", slug=m.slug, merged=merged,
                  inv_up=inv["Up"], inv_dn=inv["Down"],
