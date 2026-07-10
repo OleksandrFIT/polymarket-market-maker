@@ -150,14 +150,17 @@ def momentum_window(snaps, tape, winner, slug, size=5.0, lookback=30, threshold=
                 other = "Down" if side == "Up" else "Up"
                 if inv[side] - inv[other] >= resid_cap:
                     continue
-                ap, _asz = _ask(book[side])
+                ap, asz = _ask(book[side])
                 if ap is None or ap >= 0.99 or ap <= 0:
                     continue
-                unit = size * (ap + fee(ap))
+                f = min(size, asz)
+                if f <= 0:
+                    continue
+                unit = f * (ap + fee(ap))
                 if spent + unit > pwc:
                     continue
-                inv[side] += size
-                held[side] += size * ap          # raw price basis for pair_cost; fee is in spent
+                inv[side] += f
+                held[side] += f * ap             # raw price basis for pair_cost; fee is in spent
                 spent += unit
         merged, merged_cost = _merge(inv, held, merged, merged_cost)
     return window_record("momentum", slug, merged, merged_cost, inv["Up"], inv["Down"],

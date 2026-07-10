@@ -47,6 +47,21 @@ def test_top_book_window_maker_shadow_fill_and_merge():
     assert abs(r["pair_cost"] - 0.952) < 1e-9
 
 
+def test_top_book_window_near_end_completes_naked():
+    # snap0 mid-window: Up maker fills 5 (SELL print), Down has no SELL print -> naked +5 Up.
+    # snap1 near-end (25s left): heavy_avg 0.501 + Down ask 0.40 = 0.901 < 1 -> complete 5 Down,
+    # merge -> naked 0, completes=1, pair_cost = 0.501 + 0.40 = 0.901.
+    slug = "btc-updown-5m-1000000000"
+    snaps = [_snap(1000000010, 0.50, 0.55, 0.44, 0.46),
+             _snap(1000000275, 0.50, 0.55, 0.35, 0.40)]
+    tape = [{"oi": 0, "side": "SELL", "price": 0.50, "size": 5.0, "ts": 1000000010}]
+    r = top_book_window(snaps, tape, "Up", slug)
+    assert r["completes"] == 1
+    assert r["pairs_merged"] == 5.0
+    assert r["naked_resid"] == 0.0
+    assert abs(r["pair_cost"] - 0.901) < 1e-9
+
+
 def test_momentum_window_taker_chase_pair_over_dollar():
     # rising Up mid (0.50 -> 0.60) fires chase "Up"; taker-buys Up@0.62 + Down@0.42 -> merge 5.
     # pair_cost = 0.62 + 0.42 = 1.04 (over $1: the taker-chase mechanism the sims measured -EV).
