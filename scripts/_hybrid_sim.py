@@ -23,9 +23,10 @@ from quoter.runner.top_book_planner import taker_fee
 WINDOW_SEC = 300
 GAMMA, CLOB = "https://gamma-api.polymarket.com", "https://clob.polymarket.com"
 UA = {"User-Agent": "Mozilla/5.0 (hybrid-sim)"}
-SIZE, RESID_CAP, PWC = 5.0, 8.0, 15.0
+SIZE, RESID_CAP = 5.0, 8.0
 LOOKBACK, THRESHOLD = 30.0, 0.03
 RUN_MIN = float(sys.argv[1]) if len(sys.argv) > 1 else 90.0
+PWC = float(sys.argv[2]) if len(sys.argv) > 2 else 15.0      # per-window budget ($)
 
 
 def _get(url):
