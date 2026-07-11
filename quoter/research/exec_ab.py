@@ -4,7 +4,7 @@ cannot model queue/adverse-selection); momentum = taker-chase (decision-grade, w
 window_record computes the shared pair-cost/outcome metric identically for both styles."""
 from quoter.research.chase import chase_signal
 
-FEE_RATE = 0.018
+FEE_RATE = 0.07                      # crypto_fees_v2 taker rate (verified live 2026-07-11; was 0.018)
 TICK = 0.001
 
 

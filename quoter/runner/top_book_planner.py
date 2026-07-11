@@ -133,9 +133,20 @@ def committed_gate(cost_up: float, cost_dn: float, resting: dict,
     return committed + quote.price * quote.size < cap
 
 
-def taker_fee(price: float, rate: float = 0.018) -> float:
-    """Polymarket crypto TAKER fee per share: `rate * min(price, 1-price)` — peaks at 0.50
-    (~0.9c at rate 1.8%) and falls to ~0 at the 0/1 extremes. 0xb27b trades at the extremes
-    precisely to minimise this. Maker fills pay 0 and never call this."""
+def taker_fee(price: float, rate: float = 0.07) -> float:
+    """Polymarket crypto TAKER fee per share = `rate * min(price, 1-price)` (crypto_fees_v2,
+    exponent 1). VERIFIED LIVE 2026-07-11 from the market object: rate=0.07 (was mis-modelled at
+    0.018 → under-counted the fee ~4x). Peaks at 0.50 (~3.5c/share) and falls to ~0 at the 0/1
+    extremes. Makers pay 0 (feeSchedule.takerOnly) and never call this. See [[reference-polymarket-fees]]."""
     p = min(max(price, 0.0), 1.0)
     return rate * min(p, 1.0 - p)
+
+
+def maker_rebate(price: float, rebate_rate: float = 0.2, taker_rate: float = 0.07) -> float:
+    """Maker rebate per share earned when OUR resting order is filled: `rebate_rate * taker_fee`.
+    Polymarket crypto_fees_v2: makers pay 0 and receive rebate_rate (0.2) of the counterparty's
+    taker fee, per fill, roughly linear in our own filled volume. VERIFIED LIVE 2026-07-11
+    (feeSchedule.rebateRate=0.2). This is the maker path's SECOND revenue stream — it shifts the
+    break-even pair cost above $1.00 (~$1.01 near mid). Liquidity-rewards are a SEPARATE program,
+    inactive here (rewards.rates=None, min_size 50 > our size 5)."""
+    return rebate_rate * taker_fee(price, taker_rate)

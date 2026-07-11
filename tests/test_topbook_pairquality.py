@@ -180,3 +180,16 @@ def test_naked_residual_losing_side_is_lost(monkeypatch):
     assert fq["pairs_merged"] == 0.0
     assert fq["naked_resid"] == 5.0
     assert fq["resid_outcome"] == "LOST"
+
+
+def test_rebate_accrued_lowers_effective_pair_cost(monkeypatch):
+    # Up fills as MAKER (vanish) -> earns rebate; Down completed via taker FOK (no rebate).
+    # rebate_accrued > 0 and effective pair cost is below raw pair cost (2nd revenue stream).
+    ctl = _Ctl()
+    runner = _make_runner(ctl)
+    events = _capture(monkeypatch)
+    _run(ctl, runner, 2, monkeypatch)
+    fq = _fq(events)
+    assert fq["rebate_accrued"] > 0.0
+    assert fq["pair_cost_effective"] is not None
+    assert fq["pair_cost_effective"] < fq["pair_cost"]

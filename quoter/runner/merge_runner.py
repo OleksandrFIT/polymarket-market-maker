@@ -38,7 +38,8 @@ from quoter.runner.tilt_planner import plan_tilt
 from quoter.runner.regime_tracker import RegimeTracker
 from quoter.runner.five_min_planner import plan_five_min
 from quoter.runner.top_book_planner import (
-    plan_top_book, diff_quotes, plan_merge, committed_gate, skew_ok, link_pair_bids, taker_fee)
+    plan_top_book, diff_quotes, plan_merge, committed_gate, skew_ok, link_pair_bids, taker_fee,
+    maker_rebate)
 from quoter.research.chase import chase_signal
 from quoter.runner.regime_gate import regime_tradeable
 from quoter.runner.paper_fill import PaperBook
@@ -866,6 +867,7 @@ class MergeRunner:
         oids: dict[str, list[str]] = {"Up": [], "Down": []}
         merged = 0.0
         merged_cost = 0.0                  # realized $ cost basis of merged pairs (-> pair_cost)
+        rebate_accrued = 0.0               # maker rebate earned on our resting fills (2nd revenue)
         completes = 0                      # count of filled completion FOKs
         sells = 0                          # count of filled sell-naked FOKs
         last_mid = mid_at_entry            # last observed Up mid (winner proxy at window end)
@@ -921,6 +923,7 @@ class MergeRunner:
                                     inv[side] += matched
                                     cost[side] += matched * p
                                     held_cost[side] += matched * p
+                                    rebate_accrued += maker_rebate(p) * matched
                                     log.info("topbook_partial_fill", side=side, price=p,
                                              matched=matched)
                             await self._cancel_orders(oids.get(side, []))
@@ -976,6 +979,7 @@ class MergeRunner:
                                         inv[side] += matched
                                         cost[side] += matched * p
                                         held_cost[side] += matched * p
+                                        rebate_accrued += maker_rebate(p) * matched
                                         log.info("topbook_fill", side=side, price=p,
                                                  size=matched)
                         # NEAR-END PAIR COMPLETION: buy the light leg (taker FOK) to close a
@@ -1103,8 +1107,14 @@ class MergeRunner:
         resid_outcome = ("flat" if abs(naked) < 1e-9
                          else "WON" if ((naked > 0) == (win == "Up")) else "LOST")
         match_naked = (merged / abs(naked)) if abs(naked) >= 1e-9 else None
+        # rebate-adjusted pair cost: the maker rebate is the 2nd revenue stream (crypto_fees_v2),
+        # so break-even is ~$1.01 not $1.00. Attribute total window rebate to the merged pairs.
+        pair_cost = (merged_cost / merged) if merged > 0 else None
+        pair_cost_eff = round(pair_cost - rebate_accrued / merged, 4) if merged > 0 else None
         log.info("topbook_fillquality", slug=m.slug,
-                 pair_cost=round(merged_cost / merged, 4) if merged > 0 else None,
+                 pair_cost=round(pair_cost, 4) if pair_cost is not None else None,
+                 pair_cost_effective=pair_cost_eff,
+                 rebate_accrued=round(rebate_accrued, 4),
                  pairs_merged=merged,
                  naked_resid=round(naked, 1),
                  resid_outcome=resid_outcome,
