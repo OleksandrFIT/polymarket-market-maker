@@ -39,7 +39,7 @@ from quoter.runner.regime_tracker import RegimeTracker
 from quoter.runner.five_min_planner import plan_five_min
 from quoter.runner.top_book_planner import (
     plan_top_book, diff_quotes, plan_merge, committed_gate, skew_ok, link_pair_bids, taker_fee,
-    maker_rebate)
+    maker_rebate, chop_revoke, plan_requote as tb_plan_requote)
 from quoter.research.chase import chase_signal
 from quoter.runner.regime_gate import regime_tradeable
 from quoter.runner.paper_fill import PaperBook
@@ -871,6 +871,15 @@ class MergeRunner:
         completes = 0                      # count of filled completion FOKs
         sells = 0                          # count of filled sell-naked FOKs
         last_mid = mid_at_entry            # last observed Up mid (winner proxy at window end)
+        # revocable CLOSING gate (chop_gate only): causal mid-path + trend-confirm/freeze state.
+        mid_hist: list[tuple[float, float]] = []   # (rel_ts, up_mid) causal price path
+        closing = False                    # once True: cancel accum, post no new accum quotes
+        closing_reason = None              # "trend" | "clock"
+        revoked_at = None                  # rel_ts (sec since open) the window went CLOSING
+        trend_since = None                 # rel_ts a still-held chop_revoke trend first fired
+        last_replace = {"Up": -1e18, "Down": -1e18}   # per-side last accum (re)post ts -> dwell
+        cap_replaces = 0                   # count of cap-override cancel/reposts
+        shift_replaces = 0                 # count of pull-up (shift-driven) cancel/reposts
         tok = {"Up": m.yes_token, "Down": m.no_token}
         cadence = self.cfg.requote_sec   # re-quote cadence (env REQUOTE_SEC; 2s default, 1s A/B)
         try:
@@ -892,72 +901,125 @@ class MergeRunner:
                             last_mid = _ba if _bb is None else (_bb if _ba is None else (_bb + _ba) / 2)
                     except Exception:
                         pass
+                    # causal price path for the CLOSING trend detector (rel_ts since open, up_mid)
+                    mid_hist.append((300.0 - m.time_remaining(), last_mid))
                     # The whole mutate section (cancels + posts + fill-credit + merge)
                     # is try/excepted like the book GETs: one transient API error must
                     # not abort the window; the finally cancel_all stays the backstop.
                     try:
-                        # EARLY-AGGRESSIVE (direction-neutral mode): in the first tb_early_sec
-                        # of the 5m window, quote a bigger size to pair BOTH legs fast while the
-                        # market is near 0.50 (before a trend develops), so merges neutralize
-                        # direction. tb_early_size=0 -> normal size (feature off).
-                        early = (self.cfg.tb_early_sec > 0
-                                 and m.time_remaining() > (300.0 - self.cfg.tb_early_sec))
-                        qsize = (self.cfg.tb_early_size if (early and self.cfg.tb_early_size > 0)
-                                 else self.cfg.tb_size)
-                        target = plan_top_book(by, bn, inv["Up"], inv["Down"],
-                                               self.cfg.tb_naked_cap, qsize, self.cfg.tb_tick)
-                        # LINKED-PAIR: cap the light-side bid so any pairing fill stays < $1
-                        # (avg = held per-share cost, correct across merges). Off when margin=0.
-                        avg = {s: (held_cost[s] / inv[s] if inv[s] > 0 else None)
-                               for s in ("Up", "Down")}
-                        target = link_pair_bids(target, inv, avg, self.cfg.tb_link_margin)
-                        cancel, post = diff_quotes(resting, target)
-                        for side in cancel:
-                            # partial fills: credit the matched portion BEFORE clearing
-                            # so inv/cost/merge/skew see reality (live only; lookup
-                            # failure -> no credit, same as before).
-                            if not self.cfg.dry_run and side in resting and oids.get(side):
-                                p, _sz = resting[side]
-                                matched = self._order_matched(oids[side][0])
-                                if matched:
-                                    inv[side] += matched
-                                    cost[side] += matched * p
-                                    held_cost[side] += matched * p
-                                    rebate_accrued += maker_rebate(p) * matched
-                                    log.info("topbook_partial_fill", side=side, price=p,
-                                             matched=matched)
-                            await self._cancel_orders(oids.get(side, []))
-                            oids[side] = []
-                            resting.pop(side, None)
-                        for q in post:
-                            other = "Down" if q.side == "Up" else "Up"
-                            # HARD skew re-check against MID-TICK inventory. The plan gate
-                            # ran on tick-top inv, but the cancel loop above may have just
-                            # credited a full fill of the repriced order (partial-credit),
-                            # so inv[q.side] can already be at cap here. Without this a
-                            # reprice-during-trend would rest a fresh size-`size` order on
-                            # top of at-cap inventory -> naked up to cap+size (the residual
-                            # overshoot found in review). Mirrors the committed_gate re-check.
-                            if not skew_ok(inv[q.side], inv[other], q.size,
-                                           self.cfg.tb_naked_cap):
-                                continue
-                            # committed-capital gate, re-checked per post: each approved
-                            # quote lands in `resting` (counted below) before the next
-                            # check, so several same-tick posts can't jointly overshoot.
-                            if not committed_gate(cost["Up"], cost["Down"], resting, q,
-                                                  self.cfg.per_window_cap):
-                                continue
-                            r = await self._place_limit(token_id=tok[q.side], price=q.price,
-                                                        size=q.size, side="BUY", post_only=True)
-                            if self.cfg.dry_run:
-                                # placement is a logged no-op — resting tracks INTENT or
-                                # the diff would re-post (and re-log) every tick.
-                                resting[q.side] = (q.price, q.size)
-                            elif r and r.get("order_id"):
-                                # live: only a real order id becomes resting/committed —
-                                # a failed placement must not leave a phantom quote.
-                                oids[q.side] = [r["order_id"]]
-                                resting[q.side] = (q.price, q.size)
+                        # REVOCABLE CLOSING trigger (chop_gate only): from t>=chop_detect_sec, a
+                        # committed trend (chop_revoke held chop_confirm_sec) OR the clock
+                        # (time_remaining <= freeze_sec) flips the window to CLOSING. In CLOSING we
+                        # cancel resting ACCUMULATION bids and post no new ones; completion/merge/
+                        # sell of already-held naked legs still run below.
+                        elapsed = 300.0 - m.time_remaining()
+                        if self.cfg.chop_gate and not closing:
+                            clock = m.time_remaining() <= self.cfg.freeze_sec
+                            trend = (elapsed >= self.cfg.chop_detect_sec
+                                     and chop_revoke(mid_hist, elapsed, self.cfg.chop_dev_thresh,
+                                                     self.cfg.chop_lookback_sec))
+                            trend_since = (trend_since if (trend and trend_since is not None)
+                                           else (elapsed if trend else None))
+                            trend_confirmed = (trend and trend_since is not None
+                                               and (elapsed - trend_since) >= self.cfg.chop_confirm_sec)
+                            if clock or trend_confirmed:
+                                closing = True
+                                closing_reason = "trend" if trend_confirmed else "clock"
+                                revoked_at = round(elapsed, 0)
+                                # cancel ONLY the resting accumulation bids (completion is FOK,
+                                # never resting) so completion/merge below keep working.
+                                for s in ("Up", "Down"):
+                                    if s in resting:
+                                        await self._cancel_orders(oids.get(s, []))
+                                        oids[s] = []
+                                        resting.pop(s, None)
+                                log.info("topbook_closing", slug=m.slug,
+                                         reason=closing_reason, at_sec=revoked_at)
+                        # ACCUMULATION quoting runs only while NOT closing: in CLOSING the resting
+                        # accum bids were cancelled above and we place no new ones (completion/merge
+                        # below still run). chop_gate=False -> `closing` never flips, so this whole
+                        # block runs every tick exactly as before (byte-identical off path).
+                        if not closing:
+                            # EARLY-AGGRESSIVE (direction-neutral mode): in the first tb_early_sec
+                            # of the 5m window, quote a bigger size to pair BOTH legs fast while the
+                            # market is near 0.50 (before a trend develops), so merges neutralize
+                            # direction. tb_early_size=0 -> normal size (feature off).
+                            early = (self.cfg.tb_early_sec > 0
+                                     and m.time_remaining() > (300.0 - self.cfg.tb_early_sec))
+                            qsize = (self.cfg.tb_early_size if (early and self.cfg.tb_early_size > 0)
+                                     else self.cfg.tb_size)
+                            target = plan_top_book(by, bn, inv["Up"], inv["Down"],
+                                                   self.cfg.tb_naked_cap, qsize, self.cfg.tb_tick)
+                            # LINKED-PAIR: cap the light-side bid so any pairing fill stays < $1
+                            # (avg = held per-share cost, correct across merges). Off when margin=0.
+                            avg = {s: (held_cost[s] / inv[s] if inv[s] > 0 else None)
+                                   for s in ("Up", "Down")}
+                            target = link_pair_bids(target, inv, avg, self.cfg.tb_link_margin)
+                            if self.cfg.chop_gate:
+                                # directional, dwell-bounded requote (don't chase a mid dip DOWN to
+                                # our bid — that's our cheap fill; only pull UP a dead bid) with a
+                                # cap-override invariant (a resting bid above the current linked-pair
+                                # ceiling MUST be re-priced down). caps mirror link_pair_bids.
+                                caps = {s: (round(1.0 - avg[other] - self.cfg.tb_link_margin, 2)
+                                            if (avg.get(other) is not None and inv[other] > inv[s])
+                                            else None)
+                                        for s, other in (("Up", "Down"), ("Down", "Up"))}
+                                cancel, post, cap_sides = tb_plan_requote(
+                                    resting, target, last_replace, elapsed, caps,
+                                    self.cfg.replace_shift, self.cfg.replace_dwell_sec)
+                                cap_replaces += len(cap_sides)
+                                shift_replaces += sum(1 for q in post
+                                                      if q.side in resting and q.side not in cap_sides)
+                            else:
+                                cancel, post = diff_quotes(resting, target)
+                            for side in cancel:
+                                # partial fills: credit the matched portion BEFORE clearing
+                                # so inv/cost/merge/skew see reality (live only; lookup
+                                # failure -> no credit, same as before).
+                                if not self.cfg.dry_run and side in resting and oids.get(side):
+                                    p, _sz = resting[side]
+                                    matched = self._order_matched(oids[side][0])
+                                    if matched:
+                                        inv[side] += matched
+                                        cost[side] += matched * p
+                                        held_cost[side] += matched * p
+                                        rebate_accrued += maker_rebate(p) * matched
+                                        log.info("topbook_partial_fill", side=side, price=p,
+                                                 matched=matched)
+                                await self._cancel_orders(oids.get(side, []))
+                                oids[side] = []
+                                resting.pop(side, None)
+                            for q in post:
+                                other = "Down" if q.side == "Up" else "Up"
+                                # HARD skew re-check against MID-TICK inventory. The plan gate
+                                # ran on tick-top inv, but the cancel loop above may have just
+                                # credited a full fill of the repriced order (partial-credit),
+                                # so inv[q.side] can already be at cap here. Without this a
+                                # reprice-during-trend would rest a fresh size-`size` order on
+                                # top of at-cap inventory -> naked up to cap+size (the residual
+                                # overshoot found in review). Mirrors the committed_gate re-check.
+                                if not skew_ok(inv[q.side], inv[other], q.size,
+                                               self.cfg.tb_naked_cap):
+                                    continue
+                                # committed-capital gate, re-checked per post: each approved
+                                # quote lands in `resting` (counted below) before the next
+                                # check, so several same-tick posts can't jointly overshoot.
+                                if not committed_gate(cost["Up"], cost["Down"], resting, q,
+                                                      self.cfg.per_window_cap):
+                                    continue
+                                r = await self._place_limit(token_id=tok[q.side], price=q.price,
+                                                            size=q.size, side="BUY", post_only=True)
+                                if self.cfg.dry_run:
+                                    # placement is a logged no-op — resting tracks INTENT or
+                                    # the diff would re-post (and re-log) every tick.
+                                    resting[q.side] = (q.price, q.size)
+                                    last_replace[q.side] = elapsed
+                                elif r and r.get("order_id"):
+                                    # live: only a real order id becomes resting/committed —
+                                    # a failed placement must not leave a phantom quote.
+                                    oids[q.side] = [r["order_id"]]
+                                    resting[q.side] = (q.price, q.size)
+                                    last_replace[q.side] = elapsed
                         # fills: credit-on-vanish (LIVE) — in dry_run open-orders are empty
                         # and resting was never real, so nothing credits (mechanics-only).
                         if not self.cfg.dry_run:
