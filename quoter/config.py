@@ -123,6 +123,15 @@ class Config:
     # linked-pair quoting: cap the light-side bid so a fill pairs against the held heavy leg
     # for < $1 by construction (fixes async-fill pairs >$1); 0 = off
     tb_link_margin: float = 0.0
+    # ── chop-detector integration (revocable CLOSING gate + directional requote) ──
+    chop_gate: bool = False           # enable the revocable chop-detector on top_book
+    chop_detect_sec: float = 100.0    # revocation evaluation starts (needs path history)
+    chop_dev_thresh: float = 0.28     # |mid-0.5| commitment threshold
+    chop_lookback_sec: float = 60.0   # trailing window for "no recent 0.5-cross"
+    chop_confirm_sec: float = 10.0    # anti-flip: revoke only after held this long
+    replace_shift: float = 0.02       # up-only bid pull threshold (2 ticks; market tick = 0.01)
+    replace_dwell_sec: float = 4.0    # min interval between replaces of one side
+    freeze_sec: float = 45.0          # clock trigger for CLOSING (completion-only)
     # near-end pair completion: buy the light leg to close a naked pair (zero naked residual)
     tb_complete: bool = False           # enable near-end pair completion for top_book
     tb_complete_gate_sec: float = 45.0  # act only in the last this-many sec of the window

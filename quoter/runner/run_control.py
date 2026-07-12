@@ -62,6 +62,7 @@ if STRATEGY == "top_book":
         tb_size=5.0, tb_naked_cap=_cap, tb_tick=0.001, tb_merge_min=_merge_min,
         requote_sec=_REQUOTE_SEC,
         regime_gate=_REGIME, regime_max_move_usd=25.0, regime_lookback_min=5,
+        chop_gate=(not _REGIME),                        # on in neutral mode, off by default
         tb_early_sec=_early_sec, tb_early_size=_early_size,   # neutral: pair both legs early
         tb_complete=True, tb_complete_gate_sec=45.0,   # close naked pairs near window-end
         tb_complete_continuous=_continuous,            # neutral: complete <$1 legs all window
