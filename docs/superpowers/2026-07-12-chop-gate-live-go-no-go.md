@@ -46,9 +46,56 @@ crypto_fees_v2), so break-even is ~$1.00 on this metric, not below it.
    (`detector` vs `hindsight`), `cap_replaces`/`shift_replaces`, naked resid outcomes — these
    explain WHY a band was hit and feed the next design, but they do not move the go/no-go line.
 
+## Stopping rule (TWO-SIDED — both directions pre-committed)
+
+"No peeking to stop early" (rule 1) guards against ending the run the moment the number looks
+good/bad. But a one-sided lower bound (n ≥ 50) turns a slow market into an open-ended test — and an
+open end is itself the softest form of peeking (keep going until it "works"). So the stop is bounded
+on BOTH sides:
+
+- **Lower bound:** do not read a verdict before **n ≥ 50 merged pairs** (causal-chop). Below that,
+  no GO/NO-GO.
+- **Upper bound:** the run ends at **48 hours wall-clock OR a watchdog dd-stop, whichever comes
+  first**, even if n < 50 at that point. If it ends with n < 50, the result is **"INSUFFICIENT n"**
+  — explicitly NOT a GO/NO-GO read, and NOT a licence to extend the run to collect quorum. A new
+  decision (run longer, change size, stop) is made deliberately, not by drift.
+
+Sizing sanity: at ~2-3 pairs per traded chop window and ~50% chop share, n = 50 accrues in roughly
+**8-12 hours** of normal market. The 48h ceiling leaves generous margin; hitting it with n < 50
+means the market was abnormally thin, which is information, not a metric to chase.
+
+## Expectation anchor (set from the wider sample, NOT the favourable slice)
+
+The grid ran on 2,224 windows (1-12 Jul) → **+$0.32/window**, down from the +$0.54/window measured
+on the narrower 1,256-window 4-9 Jul slice — a ~40% haircut from regime-mix drift (early July was a
+favourable stretch). **Anchor all live expectations and capacity math to $0.32/window, not $0.54.**
+This is not a code regression; it is the sample honestly widening. Per-day distribution (see the
+day-slice run) will contain near-zero / negative days — that is normal and pre-known, so a weak
+first live day is not misread as the mechanism failing. Note this anchor is a PnL statement; it does
+NOT move the go/no-go line, which is on pair_eff (a cheap pair with thin PnL is exactly the
+freeze-axis trade-off the grid surfaced).
+
+## Pre-flight checklist (before the entry dry-run)
+
+1. **Deploy the FULL commit chain** (through the current HEAD that passed the suite) to the server —
+   a fresh checkout/pull, NOT a `git archive` of individual files. Live must run byte-for-byte the
+   code the 501-test suite validated. (The `git archive` of research scripts done for the offline
+   grid was fine because it was read-only; the live path must not be assembled piecemeal.)
+2. **In the dry-run, read three numbers** (plumbing, not EV):
+   - **Revocation fraction** vs the ~20% trend baseline — if far off, the detector is mis-firing.
+   - **`revoked_at_sec` distribution** — clustering at 110-115s means the sliding detector is
+     effectively acting only at its earliest allowed tick (not truly sliding); a healthy spread
+     across the window is expected.
+   - **`cap_replaces` vs `shift_replaces`** — both should be non-zero over a dry-run; an all-zero
+     axis means that requote path never exercised (wiring gap).
+3. **`LIVE_GO` stays OFF** until the explicit per-instance "go". Dry-run is `chop_gate=1` with no
+   `LIVE_GO`.
+
 ## Provenance
 
 - Grid-search on recorded tapes picks the config (thresholds) BEFORE this live run; it does not
   set the go/no-go line (shadow-fill is optimistic in absolute — it ranks configs, it does not
-  predict the live absolute pair cost this file judges).
+  predict the live absolute pair cost this file judges). Day-slice confirms the config choice is
+  below day-to-day noise (see `scripts/_day_slice.py`), so "center defaults 0.02/45/60" needs no
+  gaming argument — the grid simply did not distinguish.
 - Live run is gated: AWS server only, explicit per-instance "go", watchdog dd-stop armed.
