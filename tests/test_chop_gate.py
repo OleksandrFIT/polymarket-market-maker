@@ -83,3 +83,17 @@ def test_dwell_not_elapsed_keeps():
 def test_new_side_posts_and_dropped_side_cancels():
     cancel, post, cap = plan_requote({"Down": (0.10, 5.0)}, [_q("Up", 0.90)], {}, now=10)
     assert "Down" in cancel and any(q.side == "Up" for q in post)
+
+
+def test_cap_no_spurious_repost_when_resting_equals_cap():
+    # resting exactly AT the cap -> not above it -> no cap-override, no churn.
+    resting = {"Up": (0.44, 5.0)}
+    cancel, post, cap = plan_requote(resting, [_q("Up", 0.44)], {"Up": 0.0}, now=10, caps={"Up": 0.44})
+    assert cancel == [] and post == [] and cap == []
+
+
+def test_cap_no_repost_when_resting_below_cap():
+    # resting already below the cap -> invariant holds -> keep (a down move is not chased).
+    resting = {"Up": (0.40, 5.0)}
+    cancel, post, cap = plan_requote(resting, [_q("Up", 0.40)], {"Up": 0.0}, now=10, caps={"Up": 0.44})
+    assert cancel == [] and post == [] and cap == []

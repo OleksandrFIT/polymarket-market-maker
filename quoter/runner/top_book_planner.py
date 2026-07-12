@@ -113,8 +113,8 @@ def diff_quotes(current: dict, target: list[TBQuote]):
     return cancel, post
 
 
-def plan_requote(resting, target, last_replace, now, caps=None,
-                 replace_shift=0.02, dwell_sec=4.0):
+def plan_requote(resting: dict, target: list[TBQuote], last_replace: dict, now: float,
+                 caps: dict | None = None, replace_shift: float = 0.02, dwell_sec: float = 4.0):
     """Directional, dwell-bounded cancel/replace for ACCUMULATION bids (replaces diff_quotes on the
     top_book accumulation path). A mid move DOWN to our bid is our PLAN (cheap fill on the dump) — do
     not chase down; a mid move UP away makes the bid dead — pulling up trades queue for fill-rate.
@@ -139,10 +139,13 @@ def plan_requote(resting, target, last_replace, now, caps=None,
         rp = resting[q.side][0]
         cap = caps.get(q.side) if caps else None
         if cap is not None and rp > cap + 1e-12:                 # 2. cap-override (invariant)
-            cancel.append(q.side); post.append(q); cap_sides.append(q.side)
+            cancel.append(q.side)
+            post.append(q)
+            cap_sides.append(q.side)
             continue
         if q.price >= rp + replace_shift and (now - last_replace.get(q.side, -1e18)) >= dwell_sec:
-            cancel.append(q.side); post.append(q)                # 3. pull up (shift-driven)
+            cancel.append(q.side)
+            post.append(q)                                       # 3. pull up (shift-driven)
     for s in resting:
         if s not in tgt:
             cancel.append(s)
