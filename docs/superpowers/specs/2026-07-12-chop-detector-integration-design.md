@@ -63,14 +63,26 @@ Directional, dwell-bounded cancel/replace, replacing the symmetric `diff_quotes`
 Asymmetry (point 2): a mid move DOWN to our bid is our PLAN (cheap fill on the dump) — do NOT chase
 down; a mid move UP away from our bid makes the bid DEAD (won't fill) — pulling up trades queue
 position for fill-rate (the quantity we measure). Rules, per side:
-- **Pull UP only:** replace (cancel + repost) iff `target.price ≥ resting.price + replace_shift`.
-- **Never chase down:** if `target.price < resting.price`, keep the resting bid (let it fill on the
-  dump, or CLOSING cancels it).
-- **Within `replace_shift`:** no replace (anti-churn).
-- **Dwell:** replace a side only if `now − last_replace[side] ≥ dwell_sec` (avoid a quoting cycle with
-  another bot). New posts (no resting) are unconditional.
+- **CAP-OVERRIDE (invariant, runs FIRST, ignores direction AND dwell):** if the resting bid sits
+  ABOVE the current linked-pair ceiling for its side (`resting.price > cap[side]`), always cancel +
+  repost down to the capped target. A `target.price` can drop for two reasons — the mid fell (our
+  plan, keep) OR the cap tightened because `heavy_avg` grew (a stale bid above the cap that, if
+  filled, assembles a pair **≥ $1**). `plan_requote` cannot tell them apart from price alone, so the
+  cap is passed as a separate argument. This maintains the "pair < $1 by construction" guarantee — and
+  it matters most in trends, where `heavy_avg` grows and violations would concentrate exactly where
+  the naked leg is already dearest.
+- **Pull UP only:** replace iff `target.price ≥ resting.price + replace_shift` and dwell elapsed.
+- **Never chase down:** if `target.price < resting.price` (mid fell to us), keep the resting bid (fills
+  on the dump, or CLOSING cancels it).
+- **Within `replace_shift` / dwell not elapsed:** no replace (anti-churn). New posts (no resting) are
+  unconditional; `last_replace[side]` is stamped on ANY post (initial + repost), else the first repost
+  churns with no dwell.
 
-Pure, unit-tested. `link_pair_bids` still caps the light side before this runs.
+Pure, unit-tested; returns `(cancel, post, cap_sides)`. `link_pair_bids` still caps the light side
+before this runs. **Compromise (acknowledged):** in a trend the cap-override reprices the light leg
+down repeatedly — queue loss there is inevitable and acceptable (a trend is heading to revocation
+anyway). Telemetry MUST count `cap_replaces` separately from `shift_replaces`, else the two mix in
+live logs and corrupt the fill-rate interpretation.
 
 ### Unit 4 — Telemetry: causal + hindsight (cheap now, decisive after live)
 
@@ -117,12 +129,16 @@ freeze_sec        = 45.0      # clock trigger for CLOSING (completion-only)
 **Regression checklist (dry-run of the new build — PLUMBING, not EV):**
 1. Detector evaluates from t=100s (not before).
 2. Revocation → CLOSING fires on a synthetic **late** trend; accumulation bids cancelled.
-3. linked-pair cap still holds (no pairing fill ≥ $1).
-4. `topbook_fillquality` writes `pair_cost_effective`, `rebate_accrued`, `detector`, `hindsight`.
+3. linked-pair cap still holds (no pairing fill ≥ $1) — incl. cap-override repricing a stale
+   above-cap bid down (test: heavy_avg grows → light-side resting bid > cap → forced repost down).
+4. `topbook_fillquality` writes `pair_cost_effective`, `rebate_accrued`, `detector`, `hindsight`
+   (via the SHARED `window_regime` — same fn as the 51/28/20 baseline), `cap_replaces`, `shift_replaces`.
 5. Bot **actually enters** a window (the thing the last dry-run did NOT show — confirm entry/quoting).
 6. **Synthetic mid-trend that crosses 0.5 EARLY but commits AFTER 100s → revocation MUST fire** (the
    point-1 fix; without this the checklist misses the main bug).
-7. No replace during freeze/CLOSING; replace respects dwell; a downward mid move does NOT replace.
+7. No accumulation replace during freeze/CLOSING; replace respects dwell; a downward mid move does NOT
+   replace (except cap-override); **completion FOK still fires in CLOSING** (CLOSING cancels only the
+   resting accumulation bids, never the FOK completion of a leg we already hold).
 
 Full suite stays green. Dry-run is a day or two max, purely to confirm the plumbing.
 

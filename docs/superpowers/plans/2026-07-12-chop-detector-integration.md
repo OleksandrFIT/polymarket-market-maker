@@ -81,7 +81,8 @@ def chop_revoke(mid_hist, now, dev_thresh=0.28, lookback_sec=60.0):
 
 **Files:** Modify `quoter/runner/top_book_planner.py`; add to `tests/test_chop_gate.py`.
 
-- [ ] **Step 1: Add failing tests** to `tests/test_chop_gate.py`:
+- [ ] **Step 1: Add failing tests** to `tests/test_chop_gate.py` (note: `plan_requote` returns a
+3-tuple `(cancel, post, cap_sides)`):
 
 ```python
 from quoter.runner.top_book_planner import plan_requote, TBQuote
@@ -94,31 +95,41 @@ def _q(side, price):
 def test_pull_up_replaces_when_shift_and_dwell_met():
     resting = {"Up": (0.50, 5.0)}
     target = [_q("Up", 0.53)]                    # +0.03 >= 0.02 shift
-    cancel, post = plan_requote(resting, target, {"Up": 0.0}, now=10, replace_shift=0.02, dwell_sec=4)
-    assert cancel == ["Up"] and len(post) == 1 and post[0].price == 0.53
+    cancel, post, cap = plan_requote(resting, target, {"Up": 0.0}, now=10, replace_shift=0.02, dwell_sec=4)
+    assert cancel == ["Up"] and len(post) == 1 and post[0].price == 0.53 and cap == []
 
 
 def test_down_move_never_chases():
     resting = {"Up": (0.50, 5.0)}
     target = [_q("Up", 0.46)]                    # mid fell to our bid -> our plan, do NOT chase down
-    cancel, post = plan_requote(resting, target, {"Up": 0.0}, now=10)
-    assert cancel == [] and post == []
+    cancel, post, cap = plan_requote(resting, target, {"Up": 0.0}, now=10)
+    assert cancel == [] and post == [] and cap == []
+
+
+def test_cap_override_forces_down_ignoring_shift_and_dwell():
+    # INVARIANT (pair<$1): our resting bid 0.50 now sits ABOVE the linked-pair cap 0.44 (heavy_avg
+    # grew). Must cancel+repost down to <=cap even though it's a down move AND dwell hasn't elapsed —
+    # else a fill assembles a pair >= $1. Counted in cap_sides, not shift-driven.
+    resting = {"Up": (0.50, 5.0)}
+    cancel, post, cap = plan_requote(resting, [_q("Up", 0.44)], {"Up": 9.99}, now=10,
+                                     caps={"Up": 0.44}, replace_shift=0.02, dwell_sec=4)
+    assert cancel == ["Up"] and post and post[0].price == 0.44 and cap == ["Up"]
 
 
 def test_within_shift_keeps():
     resting = {"Up": (0.50, 5.0)}
-    cancel, post = plan_requote(resting, [_q("Up", 0.505)], {"Up": 0.0}, now=10, replace_shift=0.02)
+    cancel, post, cap = plan_requote(resting, [_q("Up", 0.505)], {"Up": 0.0}, now=10, replace_shift=0.02)
     assert cancel == [] and post == []
 
 
 def test_dwell_not_elapsed_keeps():
     resting = {"Up": (0.50, 5.0)}
-    cancel, post = plan_requote(resting, [_q("Up", 0.55)], {"Up": 8.0}, now=10, dwell_sec=4)  # 10-8=2 < 4
+    cancel, post, cap = plan_requote(resting, [_q("Up", 0.55)], {"Up": 8.0}, now=10, dwell_sec=4)  # 2<4
     assert cancel == [] and post == []
 
 
 def test_new_side_posts_and_dropped_side_cancels():
-    cancel, post = plan_requote({"Down": (0.10, 5.0)}, [_q("Up", 0.90)], {}, now=10)
+    cancel, post, cap = plan_requote({"Down": (0.10, 5.0)}, [_q("Up", 0.90)], {}, now=10)
     assert "Down" in cancel and any(q.side == "Up" for q in post)
 ```
 
@@ -127,27 +138,40 @@ def test_new_side_posts_and_dropped_side_cancels():
 - [ ] **Step 3: Implement.** Add to `top_book_planner.py`:
 
 ```python
-def plan_requote(resting, target, last_replace, now, replace_shift=0.02, dwell_sec=4.0):
+def plan_requote(resting, target, last_replace, now, caps=None,
+                 replace_shift=0.02, dwell_sec=4.0):
     """Directional, dwell-bounded cancel/replace for ACCUMULATION bids (replaces diff_quotes on the
     top_book accumulation path). A mid move DOWN to our bid is our PLAN (cheap fill on the dump) — do
     not chase down; a mid move UP away makes the bid dead — pulling up trades queue for fill-rate.
-    resting: {side:(price,size)}; target: list[TBQuote]; last_replace: {side: ts}.
-    Rules/side: no resting -> post; target >= resting+shift AND dwell elapsed -> replace (pull up);
-    down move / within shift / dwell not elapsed -> keep. Sides absent from target -> cancel."""
+    resting: {side:(price,size)}; target: list[TBQuote] (already linked-pair capped); last_replace:
+    {side: ts}; caps: {side: current linked-pair ceiling} (or None).
+    Returns (cancel, post, cap_sides).
+    Rules/side, in order:
+      1. no resting -> post (new side).
+      2. CAP-OVERRIDE (invariant, NOT queue-opt): if resting price > caps[side], cancel+repost down
+         to the (capped) target, IGNORING direction and dwell — a resting bid above the current cap
+         would assemble a pair >= $1 if filled (the cap tightens as heavy_avg grows, i.e. in trends).
+         -> cap_sides.
+      3. pull UP: target >= resting + shift AND dwell elapsed -> cancel+repost (shift-driven).
+      4. else (down move / within shift / dwell not elapsed) -> keep.
+    Sides absent from target -> cancel."""
     tgt = {q.side: q for q in target}
-    cancel, post = [], []
+    cancel, post, cap_sides = [], [], []
     for q in target:
         if q.side not in resting:
             post.append(q)
             continue
         rp = resting[q.side][0]
+        cap = caps.get(q.side) if caps else None
+        if cap is not None and rp > cap + 1e-12:                 # 2. cap-override (invariant)
+            cancel.append(q.side); post.append(q); cap_sides.append(q.side)
+            continue
         if q.price >= rp + replace_shift and (now - last_replace.get(q.side, -1e18)) >= dwell_sec:
-            cancel.append(q.side)
-            post.append(q)
+            cancel.append(q.side); post.append(q)                # 3. pull up (shift-driven)
     for s in resting:
         if s not in tgt:
             cancel.append(s)
-    return cancel, post
+    return cancel, post, cap_sides
 ```
 
 - [ ] **Step 4: Run** → PASS. **Step 5: Full suite** green. **Step 6: Commit** `feat(topbook): plan_requote — directional up-only cancel/replace with dwell`.
@@ -202,6 +226,11 @@ def test_closing_by_clock_freeze(monkeypatch):
 def test_no_revoke_on_choppy_book(monkeypatch):
     # book oscillating across 0.5 -> chop_revoke stays False -> keeps accumulating (posts continue).
     ...
+
+def test_completion_still_fires_in_closing(monkeypatch):
+    # after CLOSING (clock or trend), an existing naked leg with a <$1 completable pair STILL gets
+    # a completion FOK — CLOSING cancels accumulation bids but never blocks completion of what we hold.
+    ...  # assert a topbook_complete FOK is placed after the closing tick; naked -> 0
 ```
 (Model the books via the harness `up`/`dn` params over successive ticks; assert on `ctl.places`
 containing/omitting accumulation BUY posts after the decision tick, and on a `closing`-marker log.)
@@ -211,7 +240,11 @@ containing/omitting accumulation BUY posts after the decision tick, and on a `cl
 - [ ] **Step 3: Implement in `_top_book_window`:**
   - Near the window-local inits (with `last_mid = mid_at_entry`): add
     `mid_hist = []`, `closing = False`, `closing_reason = None`, `revoked_at = None`,
-    `trend_since = None`, `last_replace = {"Up": -1e18, "Down": -1e18}`.
+    `trend_since = None`, `last_replace = {"Up": -1e18, "Down": -1e18}`,
+    `cap_replaces = 0`, `shift_replaces = 0`.
+  - **SCOPE NOTE (fix):** `oids`/`resting` hold ONLY the resting ACCUMULATION maker bids. Completion
+    and sell are TAKER FOK (immediate, never rest), so the CLOSING cancel below touches accumulation
+    bids only — it does NOT cancel any pending completion. Completion/merge/sell run in CLOSING.
   - After `last_mid` is updated each tick, append: `mid_hist.append((300.0 - m.time_remaining(), last_mid))`.
   - Compute the CLOSING trigger each tick BEFORE quoting (only when `self.cfg.chop_gate`):
     ```python
@@ -233,11 +266,22 @@ containing/omitting accumulation BUY posts after the decision tick, and on a `cl
     ```
   - Gate accumulation quoting on `not closing`: wrap the `plan_top_book`→post block so it runs only
     `if not closing`. The completion/sell/merge blocks run regardless.
-  - Replace the accumulation `diff_quotes(resting, target)` with
-    `plan_requote(resting, target, last_replace, elapsed, self.cfg.replace_shift, self.cfg.replace_dwell_sec)`;
-    when a side is reposted, set `last_replace[side] = elapsed`.
+  - Replace the accumulation `diff_quotes(resting, target)` with `plan_requote`, passing the CURRENT
+    linked-pair caps so the invariant holds (compute `caps[side] = round(1 - avg[other] - margin, 2)`
+    for the light side, same formula link_pair_bids uses; `None` when no heavy leg):
+    ```python
+    caps = {s: (round(1.0 - avg[other] - self.cfg.tb_link_margin, 2)
+                if (avg[other] is not None and inv[other] > inv[s]) else None)
+            for s, other in (("Up", "Down"), ("Down", "Up"))}
+    cancel, post, cap_sides = plan_requote(resting, target, last_replace, elapsed, caps,
+                                           self.cfg.replace_shift, self.cfg.replace_dwell_sec)
+    cap_replaces += len(cap_sides)
+    shift_replaces += sum(1 for q in post if q.side in resting and q.side not in cap_sides)
+    ```
+  - **Fix (dwell at window start):** set `last_replace[side] = elapsed` on ANY post of that side
+    (initial post AND repost), not only repost — else the first repost can churn with no dwell.
   - Guard: when `chop_gate` is False, behaviour is byte-identical to today (keep the old
-    `diff_quotes` path under `else`).
+    `diff_quotes` path under `else`; no mid_hist/closing/requote overhead).
 
 - [ ] **Step 4: Run** the new tests → PASS. **Step 5: Full suite** green. **Step 6: Commit**
 `feat(topbook): revocable CLOSING gate (chop_revoke or freeze) + directional requote`.
@@ -246,26 +290,38 @@ containing/omitting accumulation BUY posts after the decision tick, and on a `cl
 
 **Files:** Modify `quoter/runner/merge_runner.py` (fillquality event + a hindsight classifier); Test `tests/test_topbook_chop_gate.py`.
 
-- [ ] **Step 1: Add a failing test** asserting `topbook_fillquality` now carries `detector`,
-`revoked_at_sec`, `closing_reason`, and `hindsight` (a chop/reversal/trend label from `mid_hist`).
+- [ ] **Step 1: Extract the SHARED regime classifier** (fix: do NOT write a third). Move the
+`regime(u_path)` logic (crosses of 0.5: `>=2 chop`, `==1 reversal`, `0 trend`) — the exact one used
+in `scripts/_chop_detector_sim.py` that produced the 51/28/20 baseline — into a pure
+`window_regime(mid_seq)` in `quoter/runner/top_book_planner.py`. Refactor `_chop_detector_sim.py`
+(and `_chop_maker_sim.py`, `_window_behaviors.py` where applicable) to IMPORT it, so the live
+hindsight label and the offline baseline are the SAME function (else the live confusion matrix is not
+comparable to 51/28/20). Unit-test `window_regime` (chop/reversal/trend from synthetic paths).
 
-- [ ] **Step 2: Implement.** Add a small hindsight classifier (crosses of 0.5 over the full
-`mid_hist`: >=2 chop, ==1 reversal, 0 trend). In the `topbook_fillquality` `log.info`, add:
+- [ ] **Step 2: Add a failing test** asserting `topbook_fillquality` carries `detector`,
+`revoked_at_sec`, `closing_reason`, `hindsight`, `cap_replaces`, `shift_replaces`.
+
+- [ ] **Step 3: Implement.** In the `topbook_fillquality` `log.info`, add:
 `detector="revoked" if closing_reason=="trend" else "chop"`, `revoked_at_sec=revoked_at`,
-`closing_reason=closing_reason`, `hindsight=<classifier(mid_hist)>`. (pair_cost_effective +
-rebate_accrued already present.)
+`closing_reason=closing_reason`, `hindsight=window_regime([m for _, m in mid_hist])`,
+`cap_replaces=cap_replaces`, `shift_replaces=shift_replaces`. (Counting cap-driven vs shift-driven
+replaces SEPARATELY is required — in a trend the cap-override reprices the light leg down repeatedly;
+mixing it into shift-driven counts would spoil the live fill-rate interpretation.) pair_cost_effective
++ rebate_accrued already present.
 
-- [ ] **Step 3: Run** → PASS. **Full suite** green. **Commit** `feat(topbook): causal+hindsight telemetry in fillquality`.
+- [ ] **Step 4: Run** → PASS. **Full suite** green. **Commit** `feat(topbook): causal+hindsight telemetry + cap/shift replace counters (shared window_regime)`.
 
 ## Task 6: Offline threshold grid-search script
 
 **Files:** Create `scripts/_config_grid.py`.
 
-- [ ] **Step 1:** Write `scripts/_config_grid.py` reusing `_chop_detector_sim` machinery: for each
-`(replace_shift ∈ {0.001,0.002,0.003}) × (freeze_sec ∈ {30,45,60}) × (lookback ∈ {40,60,80})`, run
-the maker-both sim (with `chop_revoke`/`plan_requote` applied) over the tape files passed as argv,
-print a ranked table by mean `pair_cost` and total PnL. Memory-safe (process one file at a time, as
-`_chop_detector_sim` does). No production import beyond the pure helpers + exec_ab.
+- [ ] **Step 1:** Write `scripts/_config_grid.py` reusing `_chop_detector_sim` machinery. The 5m
+market tick is **0.01** (verified from the market object: `minimum_tick_size = 0.01`), so the grid is
+in real ticks with the default at the CENTER: `replace_shift ∈ {0.01, 0.02, 0.03}` (1/2/3 ticks) ×
+`freeze_sec ∈ {30, 45, 60}` × `chop_lookback_sec ∈ {40, 60, 80}`. Run the maker-both sim (with
+`chop_revoke`/`plan_requote` applied) over the tape files passed as argv; print a ranked table by mean
+`pair_cost` and total PnL. Memory-safe (process one file at a time, as `_chop_detector_sim` does). No
+production import beyond the pure helpers + exec_ab.
 
 - [ ] **Step 2:** `.venv/bin/python -m py_compile scripts/_config_grid.py`. **Commit**
 `feat(research): offline grid-search for chop-gate thresholds`.
