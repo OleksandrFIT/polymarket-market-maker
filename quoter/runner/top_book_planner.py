@@ -113,6 +113,42 @@ def diff_quotes(current: dict, target: list[TBQuote]):
     return cancel, post
 
 
+def plan_requote(resting, target, last_replace, now, caps=None,
+                 replace_shift=0.02, dwell_sec=4.0):
+    """Directional, dwell-bounded cancel/replace for ACCUMULATION bids (replaces diff_quotes on the
+    top_book accumulation path). A mid move DOWN to our bid is our PLAN (cheap fill on the dump) — do
+    not chase down; a mid move UP away makes the bid dead — pulling up trades queue for fill-rate.
+    resting: {side:(price,size)}; target: list[TBQuote] (already linked-pair capped); last_replace:
+    {side: ts}; caps: {side: current linked-pair ceiling} (or None).
+    Returns (cancel, post, cap_sides).
+    Rules/side, in order:
+      1. no resting -> post (new side).
+      2. CAP-OVERRIDE (invariant, NOT queue-opt): if resting price > caps[side], cancel+repost down
+         to the (capped) target, IGNORING direction and dwell — a resting bid above the current cap
+         would assemble a pair >= $1 if filled (the cap tightens as heavy_avg grows, i.e. in trends).
+         -> cap_sides.
+      3. pull UP: target >= resting + shift AND dwell elapsed -> cancel+repost (shift-driven).
+      4. else (down move / within shift / dwell not elapsed) -> keep.
+    Sides absent from target -> cancel."""
+    tgt = {q.side: q for q in target}
+    cancel, post, cap_sides = [], [], []
+    for q in target:
+        if q.side not in resting:
+            post.append(q)
+            continue
+        rp = resting[q.side][0]
+        cap = caps.get(q.side) if caps else None
+        if cap is not None and rp > cap + 1e-12:                 # 2. cap-override (invariant)
+            cancel.append(q.side); post.append(q); cap_sides.append(q.side)
+            continue
+        if q.price >= rp + replace_shift and (now - last_replace.get(q.side, -1e18)) >= dwell_sec:
+            cancel.append(q.side); post.append(q)                # 3. pull up (shift-driven)
+    for s in resting:
+        if s not in tgt:
+            cancel.append(s)
+    return cancel, post, cap_sides
+
+
 def plan_merge(inv_up: float, inv_dn: float, merge_min: float) -> float:
     m = min(inv_up, inv_dn)
     return m if m >= merge_min else 0.0
