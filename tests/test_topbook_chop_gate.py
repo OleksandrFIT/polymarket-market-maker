@@ -169,6 +169,11 @@ def _last_quotes(events):
     return qs[-1] if qs else None
 
 
+def _fillquality(events):
+    fq = [kw for ev, kw in events if ev == "topbook_fillquality"]
+    return fq[-1] if fq else None
+
+
 def test_closing_on_late_trend(monkeypatch):
     # Up mid pinned high (0.85, dev 0.35 >= 0.28) with no 0.5-cross -> chop_revoke True; held
     # confirm_sec (>=20) -> CLOSING reason "trend" while still far from freeze (t_rem ~170 > 45).
@@ -232,6 +237,45 @@ def test_completion_still_fires_in_closing(monkeypatch):
     assert cl and cl[0]["reason"] == "clock", "expected clock CLOSING"
     assert _fok_buys(ctl, "DN"), "completion FOK must still fire during CLOSING"
     assert runner.state.naked_shares == 0
+
+
+def test_fillquality_carries_causal_and_hindsight(monkeypatch):
+    # trending window that CLOSES on trend (mid 0.85, dev 0.35, no cross, held >= confirm_sec) ->
+    # the fillquality event carries the causal detector label + hindsight regime for a free
+    # confusion matrix.
+    ctl = _Ctl()
+    runner = _make_runner(ctl)
+    events = _capture(monkeypatch)
+    _run(ctl, runner, 4, monkeypatch, up=(0.80, 0.90), dn=(0.01, 0.15),
+         t_start=200.0, step=15.0)
+    cl = _closings(events)
+    assert cl and cl[0]["reason"] == "trend", "expected a trend CLOSING"
+    fq = _fillquality(events)
+    assert fq is not None, "expected a topbook_fillquality event"
+    assert fq["detector"] == "revoked"
+    assert fq["closing_reason"] == "trend"
+    assert fq["revoked_at_sec"] is not None
+    assert fq["hindsight"] in {"chop", "reversal", "trend", None}
+    assert "cap_replaces" in fq and "shift_replaces" in fq
+
+
+def test_fillquality_detector_chop_when_not_revoked(monkeypatch):
+    # choppy window (mid oscillates across 0.5) that never CLOSES -> detector stays "chop",
+    # revoked_at_sec/closing_reason remain None.
+    def up(t):
+        return (0.55, 0.65) if t % 2 == 0 else (0.35, 0.45)
+
+    ctl = _Ctl()
+    runner = _make_runner(ctl)
+    events = _capture(monkeypatch)
+    _run(ctl, runner, 4, monkeypatch, up=up, dn=(0.01, 0.15),
+         t_start=150.0, step=10.0)
+    assert not _closings(events), "choppy book must not CLOSE"
+    fq = _fillquality(events)
+    assert fq is not None, "expected a topbook_fillquality event"
+    assert fq["detector"] == "chop"
+    assert fq["revoked_at_sec"] is None
+    assert fq["closing_reason"] is None
 
 
 def test_chop_gate_off_is_unchanged(monkeypatch):

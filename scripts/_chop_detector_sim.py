@@ -10,8 +10,8 @@ import statistics as st
 
 from quoter.research.mm_tape import load_window
 from quoter.research.exec_ab import top_book_window
+from quoter.runner.top_book_planner import resample_grid as resample, classify_regime as regime
 
-GRID = list(range(0, 301, 20))
 EARLY = 6                                 # first 6 grid points = 0..100s (causal decision window)
 
 
@@ -26,29 +26,6 @@ def _mid_bb_ba(bb, ba):
     if bb is None and ba is None:
         return None
     return ba if bb is None else (bb if ba is None else (bb + ba) / 2)
-
-
-def resample(pts):
-    if len(pts) < 3:
-        return None
-    out, j = [], 0
-    for g in GRID:
-        while j + 1 < len(pts) and pts[j + 1][0] <= g:
-            j += 1
-        if g <= pts[0][0]:
-            out.append(pts[0][1])
-        elif g >= pts[-1][0]:
-            out.append(pts[-1][1])
-        else:
-            (t0, m0), (t1, m1) = pts[j], pts[min(j + 1, len(pts) - 1)]
-            out.append(m0 if t1 == t0 else m0 + (m1 - m0) * (g - t0) / (t1 - t0))
-    return out
-
-
-def regime(u):                            # actual (full path) — validation only
-    sgn = [1 if x >= 0.5 else -1 for x in u]
-    crosses = sum(1 for i in range(len(sgn) - 1) if sgn[i] != sgn[i + 1])
-    return "chop" if crosses >= 2 else ("reversal" if crosses == 1 else "trend")
 
 
 def detect_trade(u):                      # CAUSAL: decide from first 100s only

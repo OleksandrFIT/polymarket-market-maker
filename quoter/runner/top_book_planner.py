@@ -191,6 +191,44 @@ def maker_rebate(price: float, rebate_rate: float = 0.2, taker_rate: float = 0.0
     return rebate_rate * taker_fee(price, taker_rate)
 
 
+_REGIME_GRID = list(range(0, 301, 20))
+
+
+def resample_grid(pts: list[tuple[float, float]]) -> list[float] | None:
+    """Resample an irregular (rel_ts, value) path onto the fixed 0..300s/20s grid via linear
+    interpolation (flat-hold outside the endpoints). Returns None if fewer than 3 points — the
+    same guard the behavior baseline uses. Identical to _chop_detector_sim.resample."""
+    if len(pts) < 3:
+        return None
+    out, j = [], 0
+    for g in _REGIME_GRID:
+        while j + 1 < len(pts) and pts[j + 1][0] <= g:
+            j += 1
+        if g <= pts[0][0]:
+            out.append(pts[0][1])
+        elif g >= pts[-1][0]:
+            out.append(pts[-1][1])
+        else:
+            (t0, m0), (t1, m1) = pts[j], pts[min(j + 1, len(pts) - 1)]
+            out.append(m0 if t1 == t0 else m0 + (m1 - m0) * (g - t0) / (t1 - t0))
+    return out
+
+
+def classify_regime(series: list[float]) -> str:
+    """Sign-cross taxonomy on a mid series (>=0.5 vs <0.5): >=2 crosses -> 'chop', 1 -> 'reversal',
+    0 -> 'trend'. Identical to _chop_detector_sim.regime — the SAME fn behind the 51/28/20 baseline."""
+    sgn = [1 if x >= 0.5 else -1 for x in series]
+    crosses = sum(1 for i in range(len(sgn) - 1) if sgn[i] != sgn[i + 1])
+    return "chop" if crosses >= 2 else ("reversal" if crosses == 1 else "trend")
+
+
+def window_regime(mid_hist: list[tuple[float, float]]) -> str | None:
+    """Post-hoc regime label for a window's full causal Up-mid path (rel_ts, up_mid). Resamples to
+    the baseline grid then classifies. Returns None when the path is too short to classify (<3 pts)."""
+    u = resample_grid(sorted(mid_hist))
+    return classify_regime(u) if u is not None else None
+
+
 def chop_revoke(mid_hist: list[tuple[float, float]], now: float,
                 dev_thresh: float = 0.28, lookback_sec: float = 60.0) -> bool:
     """Sliding, causal trend-commit signal for the revocable CLOSING gate. mid_hist: list of

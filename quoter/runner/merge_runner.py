@@ -39,7 +39,7 @@ from quoter.runner.regime_tracker import RegimeTracker
 from quoter.runner.five_min_planner import plan_five_min
 from quoter.runner.top_book_planner import (
     plan_top_book, diff_quotes, plan_merge, committed_gate, skew_ok, link_pair_bids, taker_fee,
-    maker_rebate, chop_revoke, plan_requote as tb_plan_requote)
+    maker_rebate, chop_revoke, window_regime, plan_requote as tb_plan_requote)
 from quoter.research.chase import chase_signal
 from quoter.runner.regime_gate import regime_tradeable
 from quoter.runner.paper_fill import PaperBook
@@ -1173,6 +1173,8 @@ class MergeRunner:
         # so break-even is ~$1.01 not $1.00. Attribute total window rebate to the merged pairs.
         pair_cost = (merged_cost / merged) if merged > 0 else None
         pair_cost_eff = round(pair_cost - rebate_accrued / merged, 4) if merged > 0 else None
+        hindsight = window_regime(mid_hist)          # post-hoc regime from the full causal path
+        detector = "revoked" if closing else "chop"  # the causal label the bot acted on
         log.info("topbook_fillquality", slug=m.slug,
                  pair_cost=round(pair_cost, 4) if pair_cost is not None else None,
                  pair_cost_effective=pair_cost_eff,
@@ -1182,7 +1184,13 @@ class MergeRunner:
                  resid_outcome=resid_outcome,
                  match_naked=round(match_naked, 1) if match_naked is not None else None,
                  completes=completes, sells=sells,
-                 spent=round(cost["Up"] + cost["Down"], 2))
+                 spent=round(cost["Up"] + cost["Down"], 2),
+                 detector=detector,
+                 revoked_at_sec=revoked_at,
+                 closing_reason=closing_reason,
+                 hindsight=hindsight,
+                 cap_replaces=cap_replaces,
+                 shift_replaces=shift_replaces)
         committed = cost["Up"] + cost["Down"] + sum(p * sz for (p, sz) in resting.values())
         log.info("topbook_done", slug=m.slug, merged=merged,
                  inv_up=inv["Up"], inv_dn=inv["Down"],
