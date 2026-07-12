@@ -152,7 +152,8 @@ def maker_rebate(price: float, rebate_rate: float = 0.2, taker_rate: float = 0.0
     return rebate_rate * taker_fee(price, taker_rate)
 
 
-def chop_revoke(mid_hist, now, dev_thresh=0.28, lookback_sec=60.0):
+def chop_revoke(mid_hist: list[tuple[float, float]], now: float,
+                dev_thresh: float = 0.28, lookback_sec: float = 60.0) -> bool:
     """Sliding, causal trend-commit signal for the revocable CLOSING gate. mid_hist: list of
     (rel_ts, up_mid) in time order. Returns True iff the window is committing to a trend at `now`:
       |mid(now) - 0.5| >= dev_thresh  AND  no 0.5-crossing in the trailing [now - lookback_sec, now].

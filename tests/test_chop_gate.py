@@ -30,3 +30,10 @@ def test_mid_trend_crosses_early_commits_late_revokes():
     hist = h((20, 0.46), (40, 0.54), (60, 0.48), (80, 0.53), (100, 0.62),
              (120, 0.78), (140, 0.86), (160, 0.9))
     assert chop_revoke(hist, now=160, dev_thresh=0.28, lookback_sec=60) is True
+
+
+def test_crossing_exactly_at_lookback_boundary_is_included():
+    # a sample at t == now - lookback_sec is INCLUDED in the tail (>=). It sits below 0.5 while now
+    # is committed high -> that boundary crossing keeps it chop (not revoked).
+    hist = h((40, 0.42), (70, 0.55), (100, 0.85))   # t=40 == 100-60, on the low side
+    assert chop_revoke(hist, now=100, dev_thresh=0.28, lookback_sec=60) is False
