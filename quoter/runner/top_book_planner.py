@@ -150,3 +150,21 @@ def maker_rebate(price: float, rebate_rate: float = 0.2, taker_rate: float = 0.0
     break-even pair cost above $1.00 (~$1.01 near mid). Liquidity-rewards are a SEPARATE program,
     inactive here (rewards.rates=None, min_size 50 > our size 5)."""
     return rebate_rate * taker_fee(price, taker_rate)
+
+
+def chop_revoke(mid_hist, now, dev_thresh=0.28, lookback_sec=60.0):
+    """Sliding, causal trend-commit signal for the revocable CLOSING gate. mid_hist: list of
+    (rel_ts, up_mid) in time order. Returns True iff the window is committing to a trend at `now`:
+      |mid(now) - 0.5| >= dev_thresh  AND  no 0.5-crossing in the trailing [now - lookback_sec, now].
+    Cumulative history (crossed-ever) is deliberately NOT used: a mid-trend that oscillated early then
+    commits late must revoke; a 'crossed ever' stamp would wrongly keep it chop forever."""
+    if not mid_hist:
+        return False
+    cur = mid_hist[-1][1]
+    if abs(cur - 0.5) < dev_thresh:
+        return False
+    tail = [(t, m) for (t, m) in mid_hist if t >= now - lookback_sec]
+    for i in range(len(tail) - 1):
+        if (tail[i][1] >= 0.5) != (tail[i + 1][1] >= 0.5):
+            return False                       # crossed 0.5 in the tail -> still oscillating
+    return True
