@@ -55,8 +55,11 @@ on BOTH sides:
 
 - **Lower bound:** do not read a verdict before **n ≥ 50 merged pairs** (causal-chop). Below that,
   no GO/NO-GO.
-- **Upper bound:** the run ends at **48 hours wall-clock OR a watchdog dd-stop, whichever comes
-  first**, even if n < 50 at that point. If it ends with n < 50, the result is **"INSUFFICIENT n"**
+- **Upper bound:** the run ends at **48 hours wall-clock OR the watchdog dd-stop, whichever comes
+  first** — the dd-stop is **equity ≤ −$10** persisting **2 consecutive reads** (`deploy/live_watch.sh`
+  `LIMIT=-10.0`, `DD_NEEDED=2`), with an instant **naked > 8** tripwire (`NAKED_LIMIT=8` = cap 6 + 2).
+  These are PRE-REGISTERED here so the dd number is not chosen mid-run (that would be the discretion
+  the stopping rule exists to remove). If the run ends with n < 50, the result is **"INSUFFICIENT n"**
   — explicitly NOT a GO/NO-GO read, and NOT a licence to extend the run to collect quorum. A new
   decision (run longer, change size, stop) is made deliberately, not by drift.
 
@@ -75,6 +78,14 @@ and must not be conflated:
   (FOK-buy light leg) and `sell-loser` (FOK-sell heavy) branches execute against REAL fills, a class
   of code the dry-run structurally could not exercise (no fills → no inventory → those paths never
   ran). A watchdog dd-stop is a LEGITIMATE stop under the pre-registered rule.
+- **WATCH `topbook_fill_assumed` specifically.** Maker fills are credited from the exchange-authoritative
+  `GET /order/{id}.size_matched` (a vanished order that was cancelled/rejected/expired reports
+  `size_matched=0` → no phantom credit). The ONE soft spot is the fallback: when that lookup itself
+  fails (returns None), the code assumes a FULL fill (`matched=sz`) and logs `topbook_fill_assumed` —
+  fail-conservative for spend, but a phantom for `pair_cost`. This fires only on order-status lookup
+  failure, concentrated in the cancel/replace-heavy first hours. If it fires more than a handful of
+  times, PAUSE and investigate — repeated assumes corrupt the decision metric. (This is an operational
+  stop, not peeking.)
 - **FORBIDDEN (peeking):** reading the intermediate `pair_eff` and deciding to stop/continue on it.
   If the hand reaches for STOP because "the first 20 pairs look bad" — that is peeking. The metric is
   read ONCE, at n≥50 (or at the 48h/dd upper bound → "insufficient n"). Operational failures stop the
@@ -115,3 +126,9 @@ freeze-axis trade-off the grid surfaced).
   below day-to-day noise (see `scripts/_day_slice.py`), so "center defaults 0.02/45/60" needs no
   gaming argument — the grid simply did not distinguish.
 - Live run is gated: AWS server only, explicit per-instance "go", watchdog dd-stop armed.
+- **Config = sim config (pre-registration integrity).** The offline sims that set these thresholds
+  (grid / day-slice / calib, `top_book_window_gated`) all ran **naked_cap 6, size 5, no early-aggressive
+  phase, near-end-only completion**. The live path (`run_control` REGIME_GATE=0) was aligned to exactly
+  that (commit `5bb0686`) — it is NOT the legacy 0xb27b-neutral bundle (cap 12 / early-10 /
+  continuous-complete). If any of these change, the thresholds must be re-derived. cap 6 keeps the
+  worst single window near −$3 (not the −$5 a cap-12 tail would give) and matches watchdog `NAKED_LIMIT=8`.
