@@ -60,3 +60,42 @@ def test_grid_includes_defaults():
     configs = [(s, f, lb) for s in _cg.GRID_SHIFT for f in _cg.GRID_FREEZE for lb in _cg.GRID_LOOKBACK]
     assert len(configs) == 27
     assert (0.02, 45.0, 60.0) in configs
+
+
+# --- SOFT vs HARD revocation ---------------------------------------------------------------------
+# A window with a strong sustained up-lean (up-mid 0.80) that trend-CLOSES at ~110s, then a SELL
+# print crosses BOTH frozen bids at 120s (a revert refilling standing bids). HARD cancelled the bids
+# at close -> no fill; SOFT kept them -> fills both legs -> a merged pair. This is the whole point of
+# soft revoke: a false-trend-revoke on a chop window is nearly free.
+_SR_OPEN = 1000000000
+
+
+def _lean_snap(rel):
+    return {"ts": _SR_OPEN + rel,
+            "yes": {"bids": [["0.79", "500"]], "asks": [["0.81", "500"]]},   # up-mid 0.80, dev 0.30
+            "no": {"bids": [["0.20", "500"]], "asks": [["0.22", "500"]]}}
+
+
+_SR_SNAPS = [_lean_snap(r) for r in (40, 100, 110, 120, 130)]
+# revert prints at 120s (after the ~110s trend close): cross frozen Up 0.791 and Down 0.201.
+_SR_TAPE = [{"oi": 0, "side": "SELL", "price": 0.79, "size": 5.0, "ts": _SR_OPEN + 120},
+            {"oi": 1, "side": "SELL", "price": 0.20, "size": 5.0, "ts": _SR_OPEN + 120}]
+_SR_KW = dict(chop_dev_thresh=0.28, chop_detect_sec=100.0, chop_confirm_sec=10.0,
+              chop_lookback_sec=60.0, freeze_sec=45.0)
+
+
+def test_trend_close_fires_and_records_causal_hindsight():
+    rec, _ = _cg.top_book_window_gated(_SR_SNAPS, _SR_TAPE, "Up", "btc-updown-5m-1000000000",
+                                       revoke_mode="hard", **_SR_KW)
+    assert rec["closing_reason"] == "trend"       # sustained lean -> trend revoke (not clock)
+    assert rec["hindsight"] in ("chop", "reversal", "trend")
+
+
+def test_soft_revoke_refills_frozen_bids_hard_does_not():
+    hard, _ = _cg.top_book_window_gated(_SR_SNAPS, _SR_TAPE, "Up", "btc-updown-5m-1000000000",
+                                        revoke_mode="hard", **_SR_KW)
+    soft, _ = _cg.top_book_window_gated(_SR_SNAPS, _SR_TAPE, "Up", "btc-updown-5m-1000000000",
+                                        revoke_mode="soft", **_SR_KW)
+    assert hard["pairs_merged"] == 0.0            # hard cancelled the bids at close -> no post-close fill
+    assert soft["pairs_merged"] == 5.0            # soft kept them -> the revert refilled both legs
+    assert soft["pairs_merged"] > hard["pairs_merged"]

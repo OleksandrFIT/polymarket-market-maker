@@ -24,13 +24,14 @@ import statistics as st
 
 from quoter.research.mm_tape import load_window
 from quoter.research.exec_ab import _ask, _mid, _merge, window_record, TICK
-from quoter.runner.top_book_planner import chop_revoke, maker_rebate
+from quoter.runner.top_book_planner import chop_revoke, maker_rebate, window_regime
 
 
 def top_book_window_gated(snaps, tape, winner, slug, *,
                           replace_shift=0.02, chop_dev_thresh=0.28, chop_lookback_sec=60.0,
                           chop_detect_sec=100.0, chop_confirm_sec=10.0, freeze_sec=45.0,
-                          cap=6.0, size=5.0, link_margin=0.01, pwc=15.0, complete_budget=6.0):
+                          cap=6.0, size=5.0, link_margin=0.01, pwc=15.0, complete_budget=6.0,
+                          revoke_mode="hard"):
     """Gated maker-both shadow: a copy of exec_ab.top_book_window's body plus the revocable CLOSING
     gate (mirrors production merge_runner._top_book_window). While NOT closing, accumulate maker
     best+tick both sides (shadow-fill vs SELL prints <= our bid, linked-pair light cap). A committed
@@ -38,9 +39,17 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
     (freeze_sec left) flips the window to CLOSING; once closing, NEW accumulation stops but the
     near-end complete(<$1)/sell(>=$1) of already-held naked legs and the per-snap merge keep running.
 
-    Returns (rec, rebate): `rec` = window_record(style="top_book_gated", ...); `rebate` = summed
-    maker_rebate over all maker fills (the maker path's rebate revenue; rebate-adjusted pair cost =
-    pair_cost - rebate/merged).
+    revoke_mode: on a TREND close (mid-window), "hard" = cancel all resting bids immediately
+    (completion-only after) — the production default; "soft" = keep the pre-close resting bids alive
+    (post no new legs, no pull-up, no cap-retighten) so a REVERT of the lean fills them cheap, and
+    cancel only at clock-freeze. Soft makes a false-trend-revoke on a chop window nearly free (the
+    revert refills the standing bids) while still protecting against a real trend (no new legs, cap
+    holds). Clock closes are identical under both modes (they happen at freeze anyway).
+
+    Returns (rec, rebate): `rec` = window_record(style="top_book_gated", ...) with two extra keys —
+    `rec["closing_reason"]` ("trend"|"clock"|None, the CAUSAL decision) and `rec["hindsight"]` (the
+    post-hoc regime via the shared window_regime); `rebate` = summed maker_rebate over all maker fills
+    (rebate-adjusted pair cost = pair_cost - rebate/merged).
 
     NOTE: `replace_shift` is accepted but currently UNUSED. In a shadow that fills whenever a SELL
     print crosses the bid there is no queue-position model, so requote *timing* (shift/dwell) has
@@ -59,7 +68,9 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
     budget = pwc + complete_budget
     mid_hist = []                              # (rel_ts, up_mid) causal path for the CLOSING gate
     closing = False
+    closing_reason = None                      # "trend" | "clock" — the causal decision
     trend_since = None
+    frozen = {"Up": None, "Down": None}        # last resting bid/side (kept alive under SOFT revoke)
     for i, snap in enumerate(snaps):
         ts = snap["ts"]
         end = snaps[i + 1]["ts"] if i + 1 < len(snaps) else ts + 2
@@ -80,8 +91,13 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
                                and (elapsed - trend_since) >= chop_confirm_sec)
             if clock or trend_confirmed:
                 closing = True
+                closing_reason = "trend" if trend_confirmed else "clock"
         avg = {s: (held[s] / inv[s] if inv[s] > 0 else None) for s in ("Up", "Down")}
-        # ACCUMULATION (maker best+tick both sides) runs only while NOT closing.
+        near_end = (open_ts + 300 - ts) <= freeze_sec
+        # ACCUMULATION (maker best+tick both sides) runs while NOT closing; it also records the last
+        # resting bid/side in `frozen`. SOFT revoke: after a TREND close, keep filling against those
+        # frozen bids (no recompute/pull-up/new leg) until clock-freeze, so a revert of the lean
+        # refills the standing bids. HARD revoke: no fills once closing (bids cancelled).
         if not closing:
             for side in ("Up", "Down"):
                 other = "Down" if side == "Up" else "Up"
@@ -95,6 +111,7 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
                     our = min(our, round(1.0 - avg[other] - link_margin, 3))
                 if ba is None or our >= ba or our >= 0.99 or our <= 0:
                     continue
+                frozen[side] = our                          # last resting bid (kept alive under SOFT)
                 v = sum(t["size"] for t in st_sell[oi[side]]
                         if ts <= t["ts"] < end and t["price"] <= our)
                 f = min(size, v)
@@ -103,8 +120,22 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
                     held[side] += f * our
                     spent += f * our
                     rebate += maker_rebate(our) * f          # maker rebate revenue on this fill
+        elif revoke_mode == "soft" and not near_end:
+            # SOFT: fill ONLY against the frozen pre-close bids (no recompute, no pull-up, no new leg).
+            for side in ("Up", "Down"):
+                other = "Down" if side == "Up" else "Up"
+                our = frozen[side]
+                if our is None or inv[side] - inv[other] >= cap:
+                    continue
+                v = sum(t["size"] for t in st_sell[oi[side]]
+                        if ts <= t["ts"] < end and t["price"] <= our)
+                f = min(size, v)
+                if f > 0 and spent + f * our <= budget:
+                    inv[side] += f
+                    held[side] += f * our
+                    spent += f * our
+                    rebate += maker_rebate(our) * f
         # near-end completion/sell of an already-held naked leg is NOT gated (runs even when closing)
-        near_end = (open_ts + 300 - ts) <= freeze_sec
         naked = inv["Up"] - inv["Down"]
         if near_end and abs(naked) >= 1:
             heavy = "Up" if naked > 0 else "Down"
@@ -131,6 +162,8 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
         merged, merged_cost = _merge(inv, held, merged, merged_cost)
     rec = window_record("top_book_gated", slug, merged, merged_cost, inv["Up"], inv["Down"],
                         winner, spent, completes, sells)
+    rec["closing_reason"] = closing_reason           # causal decision ("trend"|"clock"|None)
+    rec["hindsight"] = window_regime(mid_hist)        # post-hoc regime (shared baseline classifier)
     return rec, rebate
 
 
