@@ -66,16 +66,18 @@ def main():
         print("no windows")
         return
     print("\n=== per-regime decomposition (%d windows, $/window, WITH rebate) ===" % N)
-    print("%-9s %6s %4s %8s %8s %8s %8s %6s %7s %7s"
-          % ("regime", "n", "%", "merge", "rebate", "naked", "NET", "%neg", "worst", "best"))
+    print("%-9s %6s %4s %8s %7s %8s %8s %8s %6s %7s"
+          % ("regime", "n", "%", "pair_eff", "pr/win", "merge", "rebate", "NET", "%neg", "worst"))
     for reg in ("chop", "reversal", "trend", "unknown"):
         if reg not in by:
             continue
         d = by[reg]
         n = d["n"]
-        print("%-9s %6d %3.0f%% %+8.4f %+8.4f %+8.4f %+8.4f %5.0f%% %+7.2f %+7.2f"
-              % (reg, n, 100 * n / N, d["mg"] / n, d["reb"] / n, d["nk"] / n, d["pnl"] / n,
-                 100 * d["neg"] / n, d["worst"], d["best"]))
+        # pair_eff = pair_cost - rebate/merged = 1 - (merge_gross + rebate)/pairs  (derived, no new logic)
+        pe = 1 - (d["mg"] + d["reb"]) / d["pairs"] if d["pairs"] else float("nan")
+        print("%-9s %6d %3.0f%% %8.4f %7.1f %+8.4f %+8.4f %+8.4f %5.0f%% %+7.2f"
+              % (reg, n, 100 * n / N, pe, d["pairs"] / n, d["mg"] / n, d["reb"] / n,
+                 d["pnl"] / n, 100 * d["neg"] / n, d["worst"]))
     print("\nnaked-leg outcome by regime (won/lost/flat windows):")
     for reg in ("chop", "reversal", "trend"):
         if reg not in by:

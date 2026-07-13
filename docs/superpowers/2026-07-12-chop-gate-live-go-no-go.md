@@ -31,14 +31,18 @@ crypto_fees_v2), so break-even is ~$1.00 on this metric, not below it.
 | **AMBIGUOUS** | **0.96 – 0.995** | Thin / inconclusive | Do NOT scale. Either gather more pre-registered n or treat as ceiling-confirmed. No new tactic variants off this result. |
 | **NO-GO** | **> 0.995** | Tactic does not deliver cheap pairs live | Ceiling confirmed. Stop the chop-gate live branch. Do not re-run at this size hoping for a better draw. |
 
-**Margin note (production-faithful, added after the `hard_cap` calib).** The production-faithful calib
-(same skew as live) puts shadow `pair_eff ≈ 0.913` — higher than the looser sim's 0.89. So the room
-between shadow-optimistic and the 0.96 GO line is **~4.7¢** of live-degradation budget (queue + adverse
-selection), not ~7¢. The 0.96 line stays FIXED (pre-registered; goalposts do not move) and is measured
-live directly — but the honest expectation is TIGHTER: if live worsens the pair by more than ~5¢ vs
-shadow, it is NO-GO. Provenance is now closed with the same skew semantics that will run live: clock-only
-wins the hard_cap calib (**+$0.326/win, gap to best detector WIDENED to $0.0065/win**); soft revoke is
-clearly −EV (−$0.24…−$0.41/win). The sim → decision chain no longer has a fidelity gap.
+**Margin note (production-faithful, added after the `hard_cap` calib + per-regime pair_eff).** The
+production-faithful sim (same skew as live) puts pair_eff BY REGIME at: **chop 0.915** / reversal 0.920 /
+trend 0.936 — NOT the looser sim's 0.89. The go/no-go is measured on causal-CHOP windows, so the relevant
+shadow number is **chop pair_eff ≈ 0.915**, leaving only **~4.5¢** to the 0.96 GO line as the live-degradation
+budget (queue + adverse selection). The 0.89 figure was a looser-sim artifact: it allowed over-accumulation
+(naked to ~11) and the cheapest pairs come from filling one leg deep on a late dump — production `skew_ok`
+caps that at 6, so the bot skips those cheap late fills and the pair costs ~0.915. **This is material: the
+"cheap 0.89 pair, comfortable 7¢ margin" story was never reachable by the code that will run; the honest
+picture is "0.915 pair, thin 4.5¢ margin," so the prior probability of a live GO is LOWER — the measurement
+is now more likely to return NO-GO/AMBIGUOUS than GO.** The 0.96 line stays FIXED (pre-registered; goalposts
+do not move) and is measured live directly. Provenance is closed with the live skew semantics: clock-only
+wins the hard_cap calib (+$0.326/win, gap to best detector widened to $0.0065/win); soft revoke is −EV.
 
 ## Rules that make this a pre-commitment (binding on me)
 
