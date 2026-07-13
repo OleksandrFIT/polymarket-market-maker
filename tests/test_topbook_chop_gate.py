@@ -312,6 +312,34 @@ def test_observe_only_default_logs_would_revoke_without_acting(monkeypatch):
     assert _acc_posts(ctl), "accumulation continues (not revoked) under observe-only"
 
 
+def test_assumed_fill_tracked_in_fillquality(monkeypatch):
+    # When the order-status lookup fails (_order_matched -> None), the vanished maker order is credited
+    # via the assume-full fallback. The assumed shares/notional are logged in topbook_fillquality so the
+    # final pair_eff can be recomputed WITH and WITHOUT them (phantom-vs-signal separation at read time).
+    ctl = _Ctl()
+    runner = _make_runner(ctl, chop_trend_revoke=False)
+    runner._order_matched = lambda oid: None          # force the lookup-failed fallback
+    events = _capture(monkeypatch)
+    _run(ctl, runner, 3, monkeypatch, up=(0.50, 0.99), dn=(0.01, 0.45),
+         t_start=150.0, step=15.0)
+    assert any(ev == "topbook_fill_assumed" for ev, _ in events), "assume-full path must log"
+    fq = _fillquality(events)
+    assert fq is not None
+    assert fq["assumed_shares"] > 0, "assumed shares must be recorded for pair_eff sensitivity"
+    assert fq["assumed_notional"] > 0
+
+
+def test_no_assumed_fill_when_lookup_succeeds(monkeypatch):
+    # normal path: _order_matched returns a real size -> no assume-full -> assumed_shares stays 0.
+    ctl = _Ctl()
+    runner = _make_runner(ctl, chop_trend_revoke=False)
+    events = _capture(monkeypatch)
+    _run(ctl, runner, 3, monkeypatch, up=(0.50, 0.99), dn=(0.01, 0.45),
+         t_start=150.0, step=15.0)
+    fq = _fillquality(events)
+    assert fq is not None and fq["assumed_shares"] == 0 and fq["assumed_notional"] == 0
+
+
 def test_observe_only_clock_still_closes(monkeypatch):
     # observe-only disables only the TREND action; the clock trigger is unconditional -> a window run
     # into freeze_sec still CLOSES by clock (reason "clock"), detector "chop" (clock != detector-revoke).

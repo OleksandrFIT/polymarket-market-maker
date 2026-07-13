@@ -881,6 +881,8 @@ class MergeRunner:
         last_replace = {"Up": -1e18, "Down": -1e18}   # per-side last accum (re)post ts -> dwell
         cap_replaces = 0                   # count of cap-override cancel/reposts
         shift_replaces = 0                 # count of pull-up (shift-driven) cancel/reposts
+        assumed_shares = 0.0               # shares credited via the assume-full fallback (lookup failed)
+        assumed_notional = 0.0             # their cost basis — lets pair_eff be recomputed w/ & w/o them
         tok = {"Up": m.yes_token, "Down": m.no_token}
         cadence = self.cfg.requote_sec   # re-quote cadence (env REQUOTE_SEC; 2s default, 1s A/B)
         try:
@@ -1040,8 +1042,14 @@ class MergeRunner:
                                     if matched is None:
                                         # status lookup failed: assume FULL fill — over-
                                         # crediting inflates cost, so the cap only ever
-                                        # TIGHTENS (fail-conservative for spend).
+                                        # TIGHTENS (fail-conservative for spend). Track the
+                                        # assumed shares/notional so the final pair_eff can be
+                                        # recomputed WITH and WITHOUT them: if the assumed volume
+                                        # doesn't move the decision band it's ignorable; if it
+                                        # does, the read is "insufficient n", not GO/STOP.
                                         matched = sz
+                                        assumed_shares += sz
+                                        assumed_notional += sz * p
                                         log.info("topbook_fill_assumed", side=side, price=p,
                                                  size=sz)
                                     if matched > 0:
@@ -1199,7 +1207,9 @@ class MergeRunner:
                  would_revoke_at_sec=would_revoke_at,   # OBSERVE-ONLY: detector's would-be trend time
                  hindsight=hindsight,
                  cap_replaces=cap_replaces,
-                 shift_replaces=shift_replaces)
+                 shift_replaces=shift_replaces,
+                 assumed_shares=round(assumed_shares, 1),      # >0 -> some fills were lookup-fallback
+                 assumed_notional=round(assumed_notional, 4))  # -> recompute pair_eff w/ & w/o these
         committed = cost["Up"] + cost["Down"] + sum(p * sz for (p, sz) in resting.values())
         log.info("topbook_done", slug=m.slug, merged=merged,
                  inv_up=inv["Up"], inv_dn=inv["Down"],
