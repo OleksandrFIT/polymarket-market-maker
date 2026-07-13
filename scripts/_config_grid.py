@@ -31,7 +31,7 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
                           replace_shift=0.02, chop_dev_thresh=0.28, chop_lookback_sec=60.0,
                           chop_detect_sec=100.0, chop_confirm_sec=10.0, freeze_sec=45.0,
                           cap=6.0, size=5.0, link_margin=0.01, pwc=15.0, complete_budget=6.0,
-                          revoke_mode="hard"):
+                          revoke_mode="hard", hard_cap=False):
     """Gated maker-both shadow: a copy of exec_ab.top_book_window's body plus the revocable CLOSING
     gate (mirrors production merge_runner._top_book_window). While NOT closing, accumulate maker
     best+tick both sides (shadow-fill vs SELL prints <= our bid, linked-pair light cap). A committed
@@ -102,7 +102,12 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
             for side in ("Up", "Down"):
                 other = "Down" if side == "Up" else "Up"
                 b = book[side]
-                if not b["bids"] or inv[side] - inv[other] >= cap:
+                # hard_cap mirrors the PRODUCTION skew_ok (inv+size-inv_other <= cap, counts the
+                # in-flight order) so post-fill naked never exceeds cap; the default (looser, pre-fill
+                # >=cap) can overshoot to ~cap+size and OVERSTATES the naked drag / tail.
+                skewed = ((inv[side] + size - inv[other] > cap) if hard_cap
+                          else (inv[side] - inv[other] >= cap))
+                if not b["bids"] or skewed:
                     continue
                 bb = max(float(p) for p, _ in b["bids"])
                 ba, _sz = _ask(b)
