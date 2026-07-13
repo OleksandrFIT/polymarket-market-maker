@@ -19,11 +19,11 @@ crypto_fees_v2), so break-even is ~$1.00 on this metric, not below it.
   in `topbook_fillquality` (i.e. NOT revoked to CLOSING by trend). Revoked/trend windows are
   EXCLUDED from the go/no-go metric; they are the windows the tactic deliberately skips
   accumulating in, so their pair economics do not test the chop hypothesis.
-- **Minimum sample: n ≥ 50 merged pairs** across those causal-chop windows. Below 50 pairs the
+- **Minimum sample: n ≥ 80 causal-chop WINDOWS** (unit is windows, not pairs — see the stopping-rule
+  lower bound for the σ/SE derivation). Below 80 windows the
   result is NOT eligible for a decision — keep running or stop, but do NOT read a verdict into it.
-  (n is pairs, not windows: a window contributes its `pairs_merged`.)
 
-## Decision bands on mean `effective_pair_cost` (causal-chop, n ≥ 50)
+## Decision bands on mean `effective_pair_cost` (causal-chop, n ≥ 80 windows)
 
 | Band | Mean effective_pair_cost | Verdict | Action |
 |------|--------------------------|---------|--------|
@@ -47,7 +47,7 @@ wins the hard_cap calib (+$0.326/win, gap to best detector widened to $0.0065/wi
 ## Rules that make this a pre-commitment (binding on me)
 
 1. **No peeking-to-stop.** Do not end the run early because the number "looks good/bad" before
-   n ≥ 50. The stop condition is n ≥ 50 pairs OR the operator's manual stop OR the watchdog — not
+   n ≥ 80 windows. The stop condition is n ≥ 80 causal-chop windows OR the operator's manual stop OR the watchdog — not
    the metric's momentary value.
 2. **No post-hoc population changes.** The metric is causal-chop windows, effective_pair_cost. Not
    "chop after excluding window X", not "all windows if chop looks bad", not switching to raw
@@ -62,27 +62,34 @@ wins the hard_cap calib (+$0.326/win, gap to best detector widened to $0.0065/wi
 ## Stopping rule (TWO-SIDED — both directions pre-committed)
 
 "No peeking to stop early" (rule 1) guards against ending the run the moment the number looks
-good/bad. But a one-sided lower bound (n ≥ 50) turns a slow market into an open-ended test — and an
+good/bad. But a one-sided lower bound (n ≥ 80 windows) turns a slow market into an open-ended test — and an
 open end is itself the softest form of peeking (keep going until it "works"). So the stop is bounded
 on BOTH sides:
 
-- **Lower bound:** do not read a verdict before **n ≥ 50 merged pairs** (causal-chop). Below that,
-  no GO/NO-GO.
+- **Lower bound:** do not read a verdict before **n ≥ 80 causal-chop WINDOWS** (unit corrected from
+  "pairs" after the case-audit). The metric's variance lives at the WINDOW level, not the pair level —
+  pairs within a window share the same market draw, so the effective sample size is independent windows,
+  not pairs. Measured per-window pair_eff σ (chop subset) = **0.095**, so SE of the mean = σ/√(windows):
+  n=50 → 1.35¢, n=80 → 1.06¢, n=100 → 0.95¢. The HOLD band (0.96–0.995) is only 3.5¢ wide, so SE must be
+  ≤~1¢ to resolve HOLD from STOP → **n ≥ 80 windows** (≈1 day at ~100+ chop windows/day; the old "8–12h"
+  estimate matched WINDOWS, not the mis-stated "2–3 pairs/window"). Below n=80 windows, no GO/NO-GO.
 - **Upper bound:** the run ends at **48 hours wall-clock OR the watchdog dd-stop, whichever comes
   first** — the dd-stop is **equity ≤ −$10** persisting **2 consecutive reads** (`deploy/live_watch.sh`
   `LIMIT=-10.0`, `DD_NEEDED=2`), with an instant **naked > 8** tripwire (`NAKED_LIMIT=8` = cap 6 + 2).
   These are PRE-REGISTERED here so the dd number is not chosen mid-run (that would be the discretion
-  the stopping rule exists to remove). If the run ends with n < 50, the result is **"INSUFFICIENT n"**
+  the stopping rule exists to remove). If the run ends with n < 80 windows, the result is **"INSUFFICIENT n"**
   — explicitly NOT a GO/NO-GO read, and NOT a licence to extend the run to collect quorum. A new
   decision (run longer, change size, stop) is made deliberately, not by drift.
 
-Sizing sanity: at ~2-3 pairs per traded chop window and ~50% chop share, n = 50 accrues in roughly
-**8-12 hours** of normal market. The 48h ceiling leaves generous margin; hitting it with n < 50
-means the market was abnormally thin, which is information, not a metric to chase.
+Sizing sanity: the entry gate is nearly a no-op (windows open at the strike ~0.50 → only ~1% fail the
+balanced filter, per the case-audit), so ~100+ causal-chop windows accrue per day; **n = 80 windows ≈ 1 day**
+of normal market. The 48h ceiling leaves margin; hitting it with n < 80 means the market was abnormally thin,
+which is information, not a metric to chase. (The earlier "2-3 pairs/window, 8-12h" wording was wrong on the
+unit — the case-audit measured ~17 pairs/window and the binding sample size is windows, not pairs.)
 
 ## Monitoring vs peeking (operational — the line, drawn before launch)
 
-"No peeking to stop before n≥50" is about the DECISION, not about watching. The two are different
+"No peeking to stop before n≥80 windows" is about the DECISION, not about watching. The two are different
 and must not be conflated:
 
 - **MANDATORY (operational monitoring):** errors/tracebacks, watchdog state, dd-stop, that orders
