@@ -31,6 +31,15 @@ crypto_fees_v2), so break-even is ~$1.00 on this metric, not below it.
 | **AMBIGUOUS** | **0.96 – 0.995** | Thin / inconclusive | Do NOT scale. Either gather more pre-registered n or treat as ceiling-confirmed. No new tactic variants off this result. |
 | **NO-GO** | **> 0.995** | Tactic does not deliver cheap pairs live | Ceiling confirmed. Stop the chop-gate live branch. Do not re-run at this size hoping for a better draw. |
 
+**Margin note (production-faithful, added after the `hard_cap` calib).** The production-faithful calib
+(same skew as live) puts shadow `pair_eff ≈ 0.913` — higher than the looser sim's 0.89. So the room
+between shadow-optimistic and the 0.96 GO line is **~4.7¢** of live-degradation budget (queue + adverse
+selection), not ~7¢. The 0.96 line stays FIXED (pre-registered; goalposts do not move) and is measured
+live directly — but the honest expectation is TIGHTER: if live worsens the pair by more than ~5¢ vs
+shadow, it is NO-GO. Provenance is now closed with the same skew semantics that will run live: clock-only
+wins the hard_cap calib (**+$0.326/win, gap to best detector WIDENED to $0.0065/win**); soft revoke is
+clearly −EV (−$0.24…−$0.41/win). The sim → decision chain no longer has a fidelity gap.
+
 ## Rules that make this a pre-commitment (binding on me)
 
 1. **No peeking-to-stop.** Do not end the run early because the number "looks good/bad" before
