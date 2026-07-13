@@ -71,6 +71,8 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
     closing_reason = None                      # "trend" | "clock" — the causal decision
     trend_since = None
     frozen = {"Up": None, "Down": None}        # last resting bid/side (kept alive under SOFT revoke)
+    naked_at_freeze = None                      # abs naked captured at FIRST closing (freeze) tick
+    max_pair_cost = 0.0                         # max observed per-merge pair cost (linked-pair invariant)
     for i, snap in enumerate(snaps):
         ts = snap["ts"]
         end = snaps[i + 1]["ts"] if i + 1 < len(snaps) else ts + 2
@@ -92,6 +94,8 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
             if clock or trend_confirmed:
                 closing = True
                 closing_reason = "trend" if trend_confirmed else "clock"
+                if naked_at_freeze is None:      # abs naked at the first tick the window goes closing
+                    naked_at_freeze = abs(inv["Up"] - inv["Down"])
         avg = {s: (held[s] / inv[s] if inv[s] > 0 else None) for s in ("Up", "Down")}
         near_end = (open_ts + 300 - ts) <= freeze_sec
         # ACCUMULATION (maker best+tick both sides) runs while NOT closing; it also records the last
@@ -164,11 +168,31 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
                         inv[heavy] -= f
                         spent -= f * hb            # sell returns cash
                         sells += 1
+        if min(inv["Up"], inv["Down"]) > 0:              # observe the pair cost about to be merged
+            au = held["Up"] / inv["Up"]
+            ad = held["Down"] / inv["Down"]
+            max_pair_cost = max(max_pair_cost, au + ad)
         merged, merged_cost = _merge(inv, held, merged, merged_cost)
+    if naked_at_freeze is None:                           # window ended before ever going closing
+        naked_at_freeze = abs(inv["Up"] - inv["Down"])
     rec = window_record("top_book_gated", slug, merged, merged_cost, inv["Up"], inv["Down"],
                         winner, spent, completes, sells)
     rec["closing_reason"] = closing_reason           # causal decision ("trend"|"clock"|None)
     rec["hindsight"] = window_regime(mid_hist)        # post-hoc regime (shared baseline classifier)
+    rec["naked_at_freeze"] = naked_at_freeze          # abs naked at freeze (or final if no freeze)
+    rec["max_pair_cost"] = max_pair_cost              # max per-merge pair cost (invariant: < $1)
+    # exit_branch by PRIORITY RULE. NOTE: the sim does NOT model FOK-kill — it fills the near-end
+    # completion/sell whenever the price condition holds; a "rode_*" branch therefore means the
+    # near-end price CONDITION was never met (no bid to sell into / pair>=$1 with no completable light
+    # leg / budget exhausted), NOT a FOK that was tried and killed. Live FOK-kill is a separate,
+    # unmodelled tail (see report).
+    final_naked = abs(inv["Up"] - inv["Down"])
+    if naked_at_freeze < 1:
+        rec["exit_branch"] = "clean"
+    elif final_naked < 1:
+        rec["exit_branch"] = "completed" if completes > 0 else "sold"
+    else:
+        rec["exit_branch"] = "rode_won" if rec["resid_outcome"] == "WON" else "rode_lost"
     return rec, rebate
 
 

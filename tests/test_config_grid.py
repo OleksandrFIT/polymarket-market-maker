@@ -38,6 +38,29 @@ def test_returns_rec_and_nonneg_rebate():
     assert abs(rec["pair_cost"] - 0.952) < 1e-9
 
 
+def test_instrumentation_keys_present_and_sane():
+    # Additive audit keys must exist, not change the tuple shape, and be internally consistent.
+    rec, _ = _cg.top_book_window_gated(SNAPS, TAPE, "Up", SLUG, freeze_sec=30.0)
+    assert set(("naked_at_freeze", "max_pair_cost", "exit_branch")) <= set(rec)
+    # single mid-window snap, both legs merge -> ends flat, never reaches freeze -> clean branch.
+    assert rec["naked_at_freeze"] == 0.0
+    assert rec["exit_branch"] == "clean"
+    # max observed per-merge pair cost = 0.501 + 0.451 = 0.952, and must obey the linked-pair cap (<$1).
+    assert abs(rec["max_pair_cost"] - 0.952) < 1e-9
+    assert rec["max_pair_cost"] < 1.0
+
+
+def test_exit_branch_rode_when_naked_rides_to_resolution():
+    # A single naked Up leg (only the Up SELL prints), no Down leg, no near-end completion snap ->
+    # naked rides to resolution. Up wins -> rode_won.
+    snaps = [_snap(OPEN + 250, 0.50, 0.55, 0.45, 0.50)]
+    tape = [{"oi": 0, "side": "SELL", "price": 0.50, "size": 5.0, "ts": OPEN + 250}]
+    rec, _ = _cg.top_book_window_gated(snaps, tape, "Up", SLUG, freeze_sec=30.0)
+    assert rec["naked_at_freeze"] >= 1
+    assert rec["exit_branch"] in ("rode_won", "rode_lost")
+    assert rec["exit_branch"] == "rode_won"        # winner=="Up" and residual is Up
+
+
 def test_early_close_accumulates_no_more():
     # freeze=60 -> the rel_ts=250 snap (50s left) is CLOSING -> no new accumulation.
     # freeze=30 -> the same snap (50s left) is still accumulating -> merges a pair.
