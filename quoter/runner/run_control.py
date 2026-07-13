@@ -63,6 +63,9 @@ if STRATEGY == "top_book":
         requote_sec=_REQUOTE_SEC,
         regime_gate=_REGIME, regime_max_move_usd=25.0, regime_lookback_min=5,
         chop_gate=(not _REGIME),                        # on in neutral mode, off by default
+        chop_trend_revoke=(os.environ.get("CHOP_TREND_REVOKE") == "1"),   # default OFF = clock-only
+        #     (calib winner; trend-revoke net-negative). observe-only logs would_revoke_at_sec. Set
+        #     CHOP_TREND_REVOKE=1 only to re-enable the acting detector for research/rollback.
         tb_early_sec=_early_sec, tb_early_size=_early_size,   # neutral: pair both legs early
         tb_complete=True, tb_complete_gate_sec=45.0,   # close naked pairs near window-end
         tb_complete_continuous=_continuous,            # neutral: complete <$1 legs all window

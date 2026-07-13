@@ -125,6 +125,9 @@ class Config:
     tb_link_margin: float = 0.0
     # ── chop-detector integration (revocable CLOSING gate + directional requote) ──
     chop_gate: bool = False           # enable the revocable chop-detector on top_book
+    chop_trend_revoke: bool = False   # ACT on trend detection (default off = clock-only, the calib
+                                      # winner); off still computes chop_revoke each tick and logs
+                                      # would_revoke_at_sec (observe-only: free live confusion matrix)
     chop_detect_sec: float = 100.0    # revocation evaluation starts (needs path history)
     chop_dev_thresh: float = 0.28     # |mid-0.5| commitment threshold
     chop_lookback_sec: float = 60.0   # trailing window for "no recent 0.5-cross"

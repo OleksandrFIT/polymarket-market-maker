@@ -58,14 +58,17 @@ class _M:
 
 def _make_runner(ctl, chop_gate=True, fok_fills=True, per_window_cap=15.0,
                  complete_budget=6.0, chop_detect_sec=30.0, chop_confirm_sec=20.0,
-                 freeze_sec=45.0, tb_complete=True):
+                 freeze_sec=45.0, tb_complete=True, chop_trend_revoke=True):
+    # NOTE: tests default chop_trend_revoke=True (exercise the ACTING detector). Production default is
+    # False (clock-only, calib winner) — the observe-only path is covered by its own tests below.
     r = MergeRunner.__new__(MergeRunner)
     r.cfg = Config(
         strategy="top_book", assets=("BTC",), timeframes=("5m",),
         tb_size=5.0, tb_naked_cap=6.0, tb_tick=0.001, tb_merge_min=5.0,
         per_window_cap=per_window_cap, tb_complete=tb_complete, tb_complete_gate_sec=45.0,
         complete_budget=complete_budget, inv_reconcile_grace_sec=12.0, dry_run=False,
-        chop_gate=chop_gate, chop_detect_sec=chop_detect_sec, chop_dev_thresh=0.28,
+        chop_gate=chop_gate, chop_trend_revoke=chop_trend_revoke,
+        chop_detect_sec=chop_detect_sec, chop_dev_thresh=0.28,
         chop_lookback_sec=60.0, chop_confirm_sec=chop_confirm_sec,
         replace_shift=0.02, replace_dwell_sec=4.0, freeze_sec=freeze_sec,
     )
@@ -255,6 +258,7 @@ def test_fillquality_carries_causal_and_hindsight(monkeypatch):
     assert fq["detector"] == "revoked"
     assert fq["closing_reason"] == "trend"
     assert fq["revoked_at_sec"] is not None
+    assert fq["would_revoke_at_sec"] is not None      # observer fired (and here the bot acted on it)
     assert fq["hindsight"] in {"chop", "reversal", "trend", None}
     assert "cap_replaces" in fq and "shift_replaces" in fq
 
@@ -287,3 +291,36 @@ def test_chop_gate_off_is_unchanged(monkeypatch):
          t_start=200.0, step=15.0)
     assert not _closings(events), "chop_gate=False must never CLOSE"
     assert _acc_posts(ctl), "accumulation posts normally on the off path"
+
+
+def test_observe_only_default_logs_would_revoke_without_acting(monkeypatch):
+    # PRODUCTION DEFAULT (chop_trend_revoke=False): a committed trend fires the OBSERVER
+    # (would_revoke_at_sec is recorded) but the bot does NOT act — no trend CLOSING, detector stays
+    # "chop", accumulation keeps running past the would-be revoke time. This is the clock-only config
+    # (calib winner) with the free live confusion-matrix signal still logged.
+    ctl = _Ctl()
+    runner = _make_runner(ctl, chop_trend_revoke=False)
+    events = _capture(monkeypatch)
+    _run(ctl, runner, 4, monkeypatch, up=(0.80, 0.90), dn=(0.01, 0.15),
+         t_start=200.0, step=15.0)              # trending, never reaches freeze -> no clock close either
+    assert not _closings(events), "observe-only must NOT act on trend (no CLOSING)"
+    fq = _fillquality(events)
+    assert fq is not None
+    assert fq["would_revoke_at_sec"] is not None, "observer must record the would-be trend-revoke time"
+    assert fq["detector"] == "chop", "bot did not act -> detector label stays chop"
+    assert fq["closing_reason"] is None
+    assert _acc_posts(ctl), "accumulation continues (not revoked) under observe-only"
+
+
+def test_observe_only_clock_still_closes(monkeypatch):
+    # observe-only disables only the TREND action; the clock trigger is unconditional -> a window run
+    # into freeze_sec still CLOSES by clock (reason "clock"), detector "chop" (clock != detector-revoke).
+    ctl = _Ctl()
+    runner = _make_runner(ctl, chop_trend_revoke=False)
+    events = _capture(monkeypatch)
+    _run(ctl, runner, 3, monkeypatch, up=(0.50, 0.99), dn=(0.01, 0.45),
+         t_start=60.0, step=20.0)
+    cl = _closings(events)
+    assert cl and cl[0]["reason"] == "clock", "clock trigger stays unconditional under observe-only"
+    fq = _fillquality(events)
+    assert fq is not None and fq["detector"] == "chop" and fq["closing_reason"] == "clock"

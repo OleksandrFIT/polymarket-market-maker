@@ -876,6 +876,7 @@ class MergeRunner:
         closing = False                    # once True: cancel accum, post no new accum quotes
         closing_reason = None              # "trend" | "clock"
         revoked_at = None                  # rel_ts (sec since open) the window went CLOSING
+        would_revoke_at = None             # OBSERVE-ONLY: rel_ts the detector WOULD have trend-revoked
         trend_since = None                 # rel_ts a still-held chop_revoke trend first fired
         last_replace = {"Up": -1e18, "Down": -1e18}   # per-side last accum (re)post ts -> dwell
         cap_replaces = 0                   # count of cap-override cancel/reposts
@@ -907,11 +908,14 @@ class MergeRunner:
                     # is try/excepted like the book GETs: one transient API error must
                     # not abort the window; the finally cancel_all stays the backstop.
                     try:
-                        # REVOCABLE CLOSING trigger (chop_gate only): from t>=chop_detect_sec, a
-                        # committed trend (chop_revoke held chop_confirm_sec) OR the clock
-                        # (time_remaining <= freeze_sec) flips the window to CLOSING. In CLOSING we
-                        # cancel resting ACCUMULATION bids and post no new ones; completion/merge/
-                        # sell of already-held naked legs still run below.
+                        # CLOSING trigger (chop_gate only). The clock (time_remaining <= freeze_sec)
+                        # ALWAYS flips to CLOSING. The trend detector is computed every tick as an
+                        # OBSERVER (chop_revoke held chop_confirm_sec, from t>=chop_detect_sec) and
+                        # records would_revoke_at, but only ACTS on it when chop_trend_revoke is set —
+                        # default off is clock-only (the calib winner; trend-revoke was net-negative),
+                        # observe-only still logs a free would-revoke-vs-hindsight matrix on live fills.
+                        # In CLOSING we cancel resting ACCUMULATION bids and post no new ones;
+                        # completion/merge/sell of already-held naked legs still run below.
                         elapsed = 300.0 - m.time_remaining()
                         if self.cfg.chop_gate and not closing:
                             clock = m.time_remaining() <= self.cfg.freeze_sec
@@ -922,9 +926,12 @@ class MergeRunner:
                                            else (elapsed if trend else None))
                             trend_confirmed = (trend and trend_since is not None
                                                and (elapsed - trend_since) >= self.cfg.chop_confirm_sec)
-                            if clock or trend_confirmed:
+                            if trend_confirmed and would_revoke_at is None:
+                                would_revoke_at = round(elapsed, 0)     # observe-only: detector's would-be time
+                            act_trend = trend_confirmed and self.cfg.chop_trend_revoke
+                            if clock or act_trend:
                                 closing = True
-                                closing_reason = "trend" if trend_confirmed else "clock"
+                                closing_reason = "trend" if act_trend else "clock"
                                 revoked_at = round(elapsed, 0)
                                 # cancel ONLY the resting accumulation bids (completion is FOK,
                                 # never resting) so completion/merge below keep working.
@@ -1174,7 +1181,8 @@ class MergeRunner:
         pair_cost = (merged_cost / merged) if merged > 0 else None
         pair_cost_eff = round(pair_cost - rebate_accrued / merged, 4) if merged > 0 else None
         hindsight = window_regime(mid_hist)          # post-hoc regime from the full causal path
-        detector = "revoked" if closing else "chop"  # the causal label the bot acted on
+        detector = "revoked" if closing_reason == "trend" else "chop"  # what the bot ACTED on (a
+        #     clock-close is NOT a detector revocation); would_revoke_at_sec carries the observer signal
         log.info("topbook_fillquality", slug=m.slug,
                  pair_cost=round(pair_cost, 4) if pair_cost is not None else None,
                  pair_cost_effective=pair_cost_eff,
@@ -1188,6 +1196,7 @@ class MergeRunner:
                  detector=detector,
                  revoked_at_sec=revoked_at,
                  closing_reason=closing_reason,
+                 would_revoke_at_sec=would_revoke_at,   # OBSERVE-ONLY: detector's would-be trend time
                  hindsight=hindsight,
                  cap_replaces=cap_replaces,
                  shift_replaces=shift_replaces)
