@@ -112,6 +112,20 @@ regime — the structural risk; cap 6 keeps it small. This is a PnL statement; i
 the clock-only choice). Per-day distribution has near-zero / negative days (normal, pre-known). The earlier +$0.55
 figure came from the looser sim (which also overstated the tail as −$7); +$0.50 with a −$3.5 tail is the honest one.
 
+## Trend-detection ceiling — the detector branch is permanently closed
+
+Two independent measures bound what ANY trend-revocation could ever add, and both say "negligible":
+- **Upper bound from the per-regime table:** a *perfect* detector that skipped every trend window would
+  save the trend loss entirely: `0.21 (trend share) × $0.19 (trend loss/window) ≈ +$0.04/window`. That
+  is the absolute ceiling — a real detector, with false positives, gets less.
+- **Measured from the calib:** best detector config vs clock-only differed by **$0.0055/window**.
+
+Both land on the same scale: **after cap 6, trends are a small bounded cost that no detection complexity
+can pay for.** The earlier (looser-skew) calib actually ran *in the detector's favour* — it overstated the
+naked drag the detector was meant to cut, and the detector STILL lost to clock-only. The fix only widened
+that margin. Do not revisit trend detection at this size/config; the observe-only `would_revoke_at_sec`
+telemetry already logs, for free, whether live ever contradicts this. This ceiling closes the branch.
+
 ## Pre-flight checklist (before the entry dry-run)
 
 1. **Deploy the FULL commit chain** (through the current HEAD that passed the suite) to the server —

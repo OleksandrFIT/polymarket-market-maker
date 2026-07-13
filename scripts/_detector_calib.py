@@ -80,7 +80,8 @@ def main():
             n_windows += 1
             for label, kw in cfgs:
                 rec, rebate = gated(sn, tape, winner, slug,
-                                    freeze_sec=45.0, chop_lookback_sec=60.0, **kw)
+                                    freeze_sec=45.0, chop_lookback_sec=60.0,
+                                    hard_cap=True, **kw)   # production-faithful skew (naked cap 6)
                 pnl[label].append(rec["pnl"])
                 day_pnl[label][day] += rec["pnl"]
                 m = rec["pairs_merged"]
