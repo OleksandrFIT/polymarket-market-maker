@@ -45,18 +45,22 @@ if STRATEGY == "top_book":
     # keeps the calm-only regime gate. Neutral relies on linked-pair + merge + completion/SELL
     # to stay balanced; naked risk in trends is the known unverified-without-live trade-off.
     _REGIME = os.environ.get("REGIME_GATE", "1") != "0"
+    # PRE-REGISTRATION MATCH: the clock-only chop tactic (REGIME_GATE=0) runs the EXACT config the
+    # offline sim validated — grid/day-slice/calib all used naked_cap=6, size=5, NO early-aggressive
+    # phase, completion near-end only. The live measurement must test that config, not the legacy
+    # 0xb27b-neutral bundle (cap 12 / early-10 / continuous-complete), or the go/no-go thresholds and
+    # the run would come from different configs. cap 6 also keeps the watchdog NAKED_LIMIT=8 correct.
     # neutral mode needs a bigger naked cap: skew_ok limits a single order to <= cap, and a
     # merge-maker holds more (balanced) inventory to pair up. Higher cap = more naked risk in a
     # trend (the trade-off of trading every window) — watchdog naked tripwire must be raised
     # before any neutral LIVE run (it's tuned to 8 for cap 6; dry-run doesn't use it).
-    _cap = 6.0 if _REGIME else 12.0
-    _early_sec = 0.0 if _REGIME else 60.0
-    _early_size = min(0.0 if _REGIME else 10.0, _cap)   # size > cap => skew_ok blocks ALL early
-    #                                                     quotes (silent no-quote) — clamp to cap
-    # neutral leans into "always paired": merge EVERY pair immediately (recycle capital, like
-    # 0xb27b) + complete profitable naked continuously (minimize time naked). SELL stays near-end.
+    _cap = 6.0                          # validated value (both modes); watchdog NAKED_LIMIT=8 assumes it
+    _early_sec = 0.0                     # no early-aggressive phase (sim ran constant size 5)
+    _early_size = 0.0
+    # clock-only merges every pair immediately (recycle capital); completion is NEAR-END only
+    # (continuous=False) to match the sim — SELL loser also near-end only.
     _merge_min = 5.0 if _REGIME else 1.0
-    _continuous = not _REGIME
+    _continuous = False
     CFG = Config(
         strategy="top_book", assets=("BTC",), timeframes=("5m",),
         tb_size=5.0, tb_naked_cap=_cap, tb_tick=0.001, tb_merge_min=_merge_min,

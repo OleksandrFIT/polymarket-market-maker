@@ -74,19 +74,24 @@ def test_top_book_cfg_is_dry_run_by_default():
     assert c.per_window_cap == 15.0           # проба-пера cap
 
 
-def test_top_book_neutral_mode_via_env():
+def test_top_book_clock_only_mode_via_env():
+    # REGIME_GATE=0 selects the clock-only chop tactic, wired to the EXACT config the offline sim
+    # validated (cap 6 / size 5 / no early phase / near-end-only completion) so the live measurement
+    # matches the pre-registered thresholds — NOT the old 0xb27b-neutral bundle (cap 12 / early-10).
     os.environ["REGIME_GATE"] = "0"
     try:
         rc = _load_rc("top_book")
-        assert rc.CFG.regime_gate is False    # DIRECTION-NEUTRAL: trade EVERY window
-        assert rc.CFG.tb_early_sec == 60.0    # early-aggressive both-sided pairing on
-        assert rc.CFG.tb_early_size == 10.0
-        assert rc.CFG.tb_naked_cap == 12.0    # bigger cap so early size 10 passes skew_ok
-        assert rc.CFG.tb_merge_min == 1.0     # merge EVERY pair immediately (recycle capital)
-        assert rc.CFG.tb_complete_continuous is True  # complete <$1 legs all window (min naked)
-        assert rc.CFG.tb_link_margin == 0.01  # neutral keeps linked-pair + completion + SELL
+        assert rc.CFG.regime_gate is False        # regime gate off; chop_gate handles trends instead
+        assert rc.CFG.chop_gate is True
+        assert rc.CFG.chop_trend_revoke is False  # clock-only (calib winner); detector observe-only
+        assert rc.CFG.tb_naked_cap == 6.0         # validated cap; watchdog NAKED_LIMIT=8 assumes it
+        assert rc.CFG.tb_early_sec == 0.0         # no early-aggressive phase (sim ran constant size 5)
+        assert rc.CFG.tb_early_size == 0.0
+        assert rc.CFG.tb_merge_min == 1.0         # merge EVERY pair immediately (recycle capital)
+        assert rc.CFG.tb_complete_continuous is False  # completion NEAR-END only (matches sim)
+        assert rc.CFG.tb_link_margin == 0.01      # linked-pair + completion + SELL kept
         assert rc.CFG.tb_sell_naked is True
-        assert rc.CFG.dry_run is True         # neutral NEVER lifts the live lock
+        assert rc.CFG.dry_run is True             # NEVER lifts the live lock (needs LIVE_GO=1)
     finally:
         os.environ.pop("REGIME_GATE", None)
 
