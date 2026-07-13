@@ -64,6 +64,22 @@ Sizing sanity: at ~2-3 pairs per traded chop window and ~50% chop share, n = 50 
 **8-12 hours** of normal market. The 48h ceiling leaves generous margin; hitting it with n < 50
 means the market was abnormally thin, which is information, not a metric to chase.
 
+## Monitoring vs peeking (operational — the line, drawn before launch)
+
+"No peeking to stop before n≥50" is about the DECISION, not about watching. The two are different
+and must not be conflated:
+
+- **MANDATORY (operational monitoring):** errors/tracebacks, watchdog state, dd-stop, that orders
+  actually place AND cancel, that fills credit, that telemetry writes, naked never exceeds cap. Watch
+  this actively, especially the first hours — this is the FIRST time the `cap_override`, `completion`
+  (FOK-buy light leg) and `sell-loser` (FOK-sell heavy) branches execute against REAL fills, a class
+  of code the dry-run structurally could not exercise (no fills → no inventory → those paths never
+  ran). A watchdog dd-stop is a LEGITIMATE stop under the pre-registered rule.
+- **FORBIDDEN (peeking):** reading the intermediate `pair_eff` and deciding to stop/continue on it.
+  If the hand reaches for STOP because "the first 20 pairs look bad" — that is peeking. The metric is
+  read ONCE, at n≥50 (or at the 48h/dd upper bound → "insufficient n"). Operational failures stop the
+  run; the metric's momentary value never does.
+
 ## Expectation anchor (set from the wider sample, NOT the favourable slice)
 
 The grid ran on 2,224 windows (1-12 Jul) → **+$0.32/window**, down from the +$0.54/window measured
