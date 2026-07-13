@@ -93,16 +93,24 @@ and must not be conflated:
 
 ## Expectation anchor (set from the wider sample, NOT the favourable slice)
 
-The grid's `window_record.pnl` (raw prices, **no rebate**) is **+$0.35/window** over 2,523 windows,
-down from +$0.54 on the narrower favourable 4-9 Jul slice (~35% regime-mix haircut). But the decomposition
-(`scripts/_pnl_split.py`) shows the **rebate is a real +$0.20/window** cash stream the raw-price pnl omits →
-**economic expectation ≈ +$0.55/window (shadow)**, ~×0.5 live ≈ **+$0.27/window**. Anchor to those, not to
-the old +$0.54. Decomposition (shadow, $/window): merge-gross **+$1.58** + rebate **+$0.20** = gross **+$1.78**;
-naked residual **−$1.23** → net **+$0.55**. **The naked leg eats 69% of the gross** (merge:naked = 1.28:1) and
-loses **79% of naked windows** (naked shares lost:won = 4.1:1) — the tactic is a thin **+31% residual** after
-pairs and naked near-cancel, so live execution slippage hits it with ~3× leverage (why the live measurement is
-load-bearing, not optional). Per-day distribution will contain near-zero / negative days (normal, pre-known).
-The anchor is a PnL statement; it does NOT move the go/no-go line, which is on pair_eff (already rebate-adjusted).
+**Production-faithful numbers** (`scripts/_regime_split.py`, `hard_cap=True` = naked capped at 6 as the live
+`skew_ok` does; the calib/grid used a looser pre-fill skew that let naked overshoot to ~cap+size and OVERSTATED
+the tail). 2,523 windows, WITH rebate, $/window:
+
+| regime | share | net $/win | %neg | worst win | naked lost |
+|---|---|---|---|---|---|
+| chop | 52% | **+0.95** | 25% | −3.20 | 78% |
+| reversal | 26% | **+0.17** | 44% | −3.57 | 92% |
+| trend | 21% | **−0.19** | 51% | −2.97 | 96% |
+| **all** | | **+0.50** | 36% | **−3.57** | |
+
+**NOT uniform:** chop carries it, trend loses (mildly), reversal ≈ flat. Distribution ($/win, with rebate):
+p05 −2.23 / p25 −0.53 / p50 +0.57 / p75 +1.45 / p95 +3.23; min −3.57, max +8.12. **Anchor: +$0.50/window shadow,
+×~0.5 live ≈ +$0.25.** Worst single window ~−$3.5 (bounded by cap 6). The naked leg loses 78–96% of the time by
+regime — the structural risk; cap 6 keeps it small. This is a PnL statement; it does NOT move the go/no-go line
+(on pair_eff, live-measured, sim-independent — the skew-fidelity gap changes the risk numbers, not the metric or
+the clock-only choice). Per-day distribution has near-zero / negative days (normal, pre-known). The earlier +$0.55
+figure came from the looser sim (which also overstated the tail as −$7); +$0.50 with a −$3.5 tail is the honest one.
 
 ## Pre-flight checklist (before the entry dry-run)
 
