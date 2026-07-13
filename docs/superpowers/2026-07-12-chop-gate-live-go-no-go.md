@@ -93,14 +93,16 @@ and must not be conflated:
 
 ## Expectation anchor (set from the wider sample, NOT the favourable slice)
 
-The grid ran on 2,224 windows (1-12 Jul) → **+$0.32/window**, down from the +$0.54/window measured
-on the narrower 1,256-window 4-9 Jul slice — a ~40% haircut from regime-mix drift (early July was a
-favourable stretch). **Anchor all live expectations and capacity math to $0.32/window, not $0.54.**
-This is not a code regression; it is the sample honestly widening. Per-day distribution (see the
-day-slice run) will contain near-zero / negative days — that is normal and pre-known, so a weak
-first live day is not misread as the mechanism failing. Note this anchor is a PnL statement; it does
-NOT move the go/no-go line, which is on pair_eff (a cheap pair with thin PnL is exactly the
-freeze-axis trade-off the grid surfaced).
+The grid's `window_record.pnl` (raw prices, **no rebate**) is **+$0.35/window** over 2,523 windows,
+down from +$0.54 on the narrower favourable 4-9 Jul slice (~35% regime-mix haircut). But the decomposition
+(`scripts/_pnl_split.py`) shows the **rebate is a real +$0.20/window** cash stream the raw-price pnl omits →
+**economic expectation ≈ +$0.55/window (shadow)**, ~×0.5 live ≈ **+$0.27/window**. Anchor to those, not to
+the old +$0.54. Decomposition (shadow, $/window): merge-gross **+$1.58** + rebate **+$0.20** = gross **+$1.78**;
+naked residual **−$1.23** → net **+$0.55**. **The naked leg eats 69% of the gross** (merge:naked = 1.28:1) and
+loses **79% of naked windows** (naked shares lost:won = 4.1:1) — the tactic is a thin **+31% residual** after
+pairs and naked near-cancel, so live execution slippage hits it with ~3× leverage (why the live measurement is
+load-bearing, not optional). Per-day distribution will contain near-zero / negative days (normal, pre-known).
+The anchor is a PnL statement; it does NOT move the go/no-go line, which is on pair_eff (already rebate-adjusted).
 
 ## Pre-flight checklist (before the entry dry-run)
 
