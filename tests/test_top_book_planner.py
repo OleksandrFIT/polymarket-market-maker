@@ -23,11 +23,31 @@ def test_link_pair_leaves_heavy_side_untouched():
     assert out[0].price == 0.481
 
 
-def test_link_pair_balanced_unchanged():
-    # no heavy leg (balanced / no holdings) -> both quotes unchanged
-    tgt = [TBQuote("Up", 0.481, 5.0), TBQuote("Down", 0.521, 5.0)]
+def test_link_pair_balanced_low_sum_unchanged():
+    # no holdings AND the two bids sum < 1 - margin -> unchanged (nothing to pair against, sum safe)
+    tgt = [TBQuote("Up", 0.481, 5.0), TBQuote("Down", 0.491, 5.0)]   # sum 0.972 < 0.99
     out = link_pair_bids(tgt, {"Up": 0.0, "Down": 0.0}, {"Up": None, "Down": None}, 0.01)
-    assert [(q.side, q.price) for q in out] == [("Up", 0.481), ("Down", 0.521)]
+    assert [(q.side, q.price) for q in out] == [("Up", 0.481), ("Down", 0.491)]
+
+
+def test_link_pair_joint_sum_caps_from_empty():
+    # from an empty book both avg None, bids sum 1.002 >= $1 -> WITHOUT the joint-sum cap two
+    # simultaneous fills would assemble a pair >= $1 (the case-audit leak). The cap reduces both so
+    # the sum = 1 - margin = 0.99.
+    tgt = [TBQuote("Up", 0.481, 5.0), TBQuote("Down", 0.521, 5.0)]   # sum 1.002
+    out = link_pair_bids(tgt, {"Up": 0.0, "Down": 0.0}, {"Up": None, "Down": None}, 0.01)
+    prices = {q.side: q.price for q in out}
+    assert prices["Up"] + prices["Down"] <= 0.99 + 1e-9
+    assert abs(prices["Up"] - 0.475) < 1e-9 and abs(prices["Down"] - 0.515) < 1e-9
+
+
+def test_link_pair_two_sided_caps_the_heavier_side():
+    # TWO-SIDED cap (the invariant fix): holding BOTH legs, quoting Up while Down avg is 0.55 ->
+    # Up is capped against Down's avg (1 - 0.55 - 0.01 = 0.44) even though Up is NOT the lighter
+    # side. The OLD one-sided rule left Up uncapped -> 0.50 + 0.55 = 1.05 pair (the leak).
+    out = link_pair_bids([TBQuote("Up", 0.50, 5.0)], {"Up": 5.0, "Down": 5.0},
+                         {"Up": 0.50, "Down": 0.55}, 0.01)
+    assert abs(out[0].price - 0.44) < 1e-9
 
 
 def test_link_pair_drops_side_when_cap_nonpositive():

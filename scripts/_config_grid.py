@@ -103,6 +103,10 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
         # frozen bids (no recompute/pull-up/new leg) until clock-freeze, so a revert of the lean
         # refills the standing bids. HARD revoke: no fills once closing (bids cancelled).
         if not closing:
+            # PASS 1: compute each eligible side's linked-pair-capped bid (mirrors production
+            # link_pair_bids TWO-SIDED cap: bind against the OTHER side's avg whenever it holds
+            # inventory, not only the lighter side).
+            bids = {}
             for side in ("Up", "Down"):
                 other = "Down" if side == "Up" else "Up"
                 b = book[side]
@@ -116,10 +120,19 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
                 bb = max(float(p) for p, _ in b["bids"])
                 ba, _sz = _ask(b)
                 our = round(bb + TICK, 3)
-                if inv[other] > inv[side] and avg[other] is not None:       # linked-pair light cap
+                if avg[other] is not None:                                  # two-sided linked-pair cap
                     our = min(our, round(1.0 - avg[other] - link_margin, 3))
                 if ba is None or our >= ba or our >= 0.99 or our <= 0:
                     continue
+                bids[side] = our
+            # JOINT-SUM cap: from an (near-)empty book neither avg exists, so two simultaneous fills
+            # could assemble a pair >= $1 — cap the SUM of the two bids at 1 - link_margin.
+            if len(bids) == 2 and bids["Up"] + bids["Down"] > 1.0 - link_margin:
+                cut = round((bids["Up"] + bids["Down"] - (1.0 - link_margin)) / 2.0, 3)
+                bids = {s: round(p - cut, 3) for s, p in bids.items()}
+                bids = {s: p for s, p in bids.items() if p > 0}
+            # PASS 2: shadow-fill against the capped bids.
+            for side, our in bids.items():
                 frozen[side] = our                          # last resting bid (kept alive under SOFT)
                 v = sum(t["size"] for t in st_sell[oi[side]]
                         if ts <= t["ts"] < end and t["price"] <= our)
@@ -151,7 +164,7 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
             light = "Down" if heavy == "Up" else "Up"
             heavy_avg = held[heavy] / inv[heavy] if inv[heavy] > 0 else 0.0
             lap, lsz = _ask(book[light])
-            if lap is not None and lap < 0.99 and heavy_avg + lap < 1.0:
+            if lap is not None and lap < 0.99 and heavy_avg + lap < 1.0 - link_margin:
                 f = min(abs(naked), lsz)
                 if f > 0 and spent + f * lap <= budget:
                     inv[light] += f

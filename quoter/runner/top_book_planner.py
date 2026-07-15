@@ -67,35 +67,43 @@ def plan_top_book(yes_book, no_book, inv_up: float, inv_dn: float,
 
 
 def link_pair_bids(target: list[TBQuote], inv: dict, avg: dict, margin: float) -> list[TBQuote]:
-    """LINKED-PAIR quoting: cap each LIGHT-side (under-weight) bid so a fill pairs against the
-    held HEAVY leg for < $1 by construction — bid <= 1 - heavy_avg - margin.
+    """LINKED-PAIR quoting: keep every pairing fill < $1 by construction (bid <= 1 - other_avg -
+    margin), TWO-SIDED, plus a joint-sum cap for the from-empty case.
 
     Fixes the async-fill loss: quoting both sides at best+tick independently fills the two legs
     at DIFFERENT market states (market moves between fills), so pair cost can exceed $1 (live-
     proven: leg1 at 0.32, market moves, leg2 at 0.74 -> pair 1.06). Live book shows best_bid_up
     + best_bid_dn = 0.99 (a real +1c merge edge) — but only if BOTH legs fill at the same state.
-    Capping the light bid at 1 - heavy_avg - margin guarantees any pairing fill stays < $1; if
-    the market moved away the capped bid rests below best and simply doesn't fill (-> hold naked,
-    handled near-end), never overpaying. Heavy side is left unchanged. A light cap <= 0 drops
-    that side (can't pair profitably). margin <= 0 -> unchanged (feature off).
+
+    TWO-SIDED (fixed after the case-audit found a 1% pair >= $1 leak): the cap binds on EITHER side
+    whenever the OTHER side holds inventory — not only on the lighter side. The old one-sided form
+    left a fill on the *heavier* side uncapped, so buying more heavy while `other_avg` was high could
+    blend the pair to >= $1. Capping each bid at 1 - other_avg - margin bounds avg_this so that
+    avg_up + avg_dn stays < 1 - margin at all times. A cap <= 0 drops that side (can't pair
+    profitably). margin <= 0 -> unchanged (feature off).
+
+    JOINT-SUM: when BOTH sides are quoted from a (near-)empty book neither avg exists yet, so two
+    fills in one tick could assemble a pair >= $1. Cap the SUM of the two resting bids at 1 - margin
+    (reduce both symmetrically) so ANY pair — even both legs filling at once — stays < $1.
     """
     if margin <= 0:
         return target
-    # Per-order safety: a light order is priced against the heavy avg AT POST TIME. If more
-    # heavy fills later (raising heavy_avg) before this light order fills, the resting order
-    # isn't re-tightened until the next requote — but it still pairs < $1 against the heavy
-    # shares that existed when it was priced (the new heavy shares pair against FUTURE light
-    # fills). So each light fill is individually capped; the blended pair cost stays < $1.
     out: list[TBQuote] = []
     for q in target:
-        heavy = "Down" if q.side == "Up" else "Up"
-        if inv.get(heavy, 0.0) > inv.get(q.side, 0.0) and avg.get(heavy) is not None:
-            capped = min(q.price, round(1.0 - avg[heavy] - margin, 3))
+        other = "Down" if q.side == "Up" else "Up"
+        # cap against the OTHER side's avg whenever the other side holds inventory (two-sided).
+        if avg.get(other) is not None:
+            capped = min(q.price, round(1.0 - avg[other] - margin, 3))
             if capped <= 0:
                 continue
             out.append(TBQuote(q.side, capped, q.size))
         else:
             out.append(q)
+    # joint-sum cap for the from-empty simultaneous-fill case.
+    if len(out) == 2 and out[0].price + out[1].price > 1.0 - margin:
+        cut = round((out[0].price + out[1].price - (1.0 - margin)) / 2.0, 3)
+        reduced = [TBQuote(q.side, round(q.price - cut, 3), q.size) for q in out]
+        out = [q for q in reduced if q.price > 0]
     return out
 
 

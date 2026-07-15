@@ -1099,8 +1099,10 @@ class MergeRunner:
                                 if light_ask and light_ask > 0:
                                     qty = min(qty, budget_left / light_ask)
                                 qty = float(int(qty))
+                                # margin (link_margin) so a completed pair also stays < $1 with the
+                                # same buffer the accumulation cap uses (case-audit invariant fix).
                                 can_complete = (qty >= 1 and light_ask and heavy_avg is not None
-                                                and (heavy_avg + light_ask) < 1.0)
+                                                and (heavy_avg + light_ask) < 1.0 - self.cfg.tb_link_margin)
                                 if can_complete:
                                     r = await self._place_limit(
                                         token_id=tok[light], price=light_ask, size=qty,
