@@ -73,6 +73,12 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
     frozen = {"Up": None, "Down": None}        # last resting bid/side (kept alive under SOFT revoke)
     naked_at_freeze = None                      # abs naked captured at FIRST closing (freeze) tick
     max_pair_cost = 0.0                         # max observed per-merge pair cost (linked-pair invariant)
+    mid_up_at_freeze = None                     # _mid of each book at the FIRST closing (freeze) tick
+    mid_dn_at_freeze = None                     # (None when the window never went closing)
+    sell_px = None                              # realized near-end sell price (the heavy bid `hb`)
+    sell_side = None                            # which leg the near-end sell dumped
+    near_end_snap = False                       # did the tape have ANY snapshot inside the near-end?
+    e_reason = None                             # last near-end outcome (why no close executed)
     for i, snap in enumerate(snaps):
         ts = snap["ts"]
         end = snaps[i + 1]["ts"] if i + 1 < len(snaps) else ts + 2
@@ -96,6 +102,8 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
                 closing_reason = "trend" if trend_confirmed else "clock"
                 if naked_at_freeze is None:      # abs naked at the first tick the window goes closing
                     naked_at_freeze = abs(inv["Up"] - inv["Down"])
+                    mid_up_at_freeze = _mid(book["Up"])   # freeze-time value of each leg (shadow
+                    mid_dn_at_freeze = _mid(book["Down"])  # baseline ref for sell recovery)
         avg = {s: (held[s] / inv[s] if inv[s] > 0 else None) for s in ("Up", "Down")}
         near_end = (open_ts + 300 - ts) <= freeze_sec
         # ACCUMULATION (maker best+tick both sides) runs while NOT closing; it also records the last
@@ -158,6 +166,8 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
                     spent += f * our
                     rebate += maker_rebate(our) * f
         # near-end completion/sell of an already-held naked leg is NOT gated (runs even when closing)
+        if near_end:
+            near_end_snap = True                  # the tape HAS a snapshot inside the near-end window
         naked = inv["Up"] - inv["Down"]
         if near_end and abs(naked) >= 1:
             heavy = "Up" if naked > 0 else "Down"
@@ -171,6 +181,11 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
                     held[light] += f * lap
                     spent += f * lap
                     completes += 1
+                    e_reason = None               # the close EXECUTED at this tick
+                elif f > 0:
+                    e_reason = "budget"           # completion priced OK but the budget check blocked it
+                else:
+                    e_reason = "other:no_light_ask_size"
             else:
                 hb = max((float(p) for p, _ in book[heavy]["bids"]), default=None)
                 if hb is not None and hb > 0:
@@ -181,6 +196,15 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
                         inv[heavy] -= f
                         spent -= f * hb            # sell returns cash
                         sells += 1
+                        sell_px = hb               # the realized sell price (heavy/loser best bid)
+                        sell_side = heavy
+                        e_reason = None            # the close EXECUTED at this tick
+                    else:
+                        e_reason = "other:naked_floor_zero"
+                else:
+                    # completion condition failed AND the heavy/loser book has no bid: there is
+                    # nothing left to sell into -> structurally unfixable post-hoc.
+                    e_reason = "no_bid_on_loser"
         if min(inv["Up"], inv["Down"]) > 0:              # observe the pair cost about to be merged
             au = held["Up"] / inv["Up"]
             ad = held["Down"] / inv["Down"]
@@ -194,6 +218,10 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
     rec["hindsight"] = window_regime(mid_hist)        # post-hoc regime (shared baseline classifier)
     rec["naked_at_freeze"] = naked_at_freeze          # abs naked at freeze (or final if no freeze)
     rec["max_pair_cost"] = max_pair_cost              # max per-merge pair cost (invariant: < $1)
+    rec["mid_up_at_freeze"] = mid_up_at_freeze        # per-leg mid at freeze (None if never closing)
+    rec["mid_dn_at_freeze"] = mid_dn_at_freeze
+    rec["sell_px"] = sell_px                          # realized near-end sell price (None if no sell)
+    rec["sell_side"] = sell_side                      # leg the sell dumped (None if no sell)
     # exit_branch by PRIORITY RULE. NOTE: the sim does NOT model FOK-kill — it fills the near-end
     # completion/sell whenever the price condition holds; a "rode_*" branch therefore means the
     # near-end price CONDITION was never met (no bid to sell into / pair>=$1 with no completable light
@@ -206,6 +234,22 @@ def top_book_window_gated(snaps, tape, winner, slug, *,
         rec["exit_branch"] = "completed" if completes > 0 else "sold"
     else:
         rec["exit_branch"] = "rode_won" if rec["resid_outcome"] == "WON" else "rode_lost"
+    # e_reason: for RODE windows only, WHY the near-end close never executed. Because the sim does not
+    # model FOK-kill (it executes whenever the price condition holds), every reason here is STRUCTURAL:
+    # no near-end snapshot at all, no bid on the loser to sell into, or the budget check. Live FOK-kill
+    # is a separate, unmodelled tail (production logs `sell_kills`/`complete_kills` for exactly that).
+    if rec["exit_branch"] in ("rode_won", "rode_lost"):
+        if not near_end_snap:
+            rec["e_reason"] = "no_near_end_snap"
+        elif e_reason is None:
+            # near-end snaps existed but the block never fired (naked < 1 at every near-end tick) —
+            # should be unreachable, since accumulation stops at closing and the merge leaves naked
+            # invariant; recorded rather than asserted so a tape oddity surfaces instead of crashing.
+            rec["e_reason"] = "other:near_end_ran_but_naked_below_1"
+        else:
+            rec["e_reason"] = e_reason
+    else:
+        rec["e_reason"] = None
     return rec, rebate
 
 

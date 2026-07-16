@@ -59,6 +59,68 @@ def test_exit_branch_rode_when_naked_rides_to_resolution():
     assert rec["naked_at_freeze"] >= 1
     assert rec["exit_branch"] in ("rode_won", "rode_lost")
     assert rec["exit_branch"] == "rode_won"        # winner=="Up" and residual is Up
+    # the tape's only snap is at 50s-to-close with freeze 30 -> the near-end block never ran at all
+    assert rec["e_reason"] == "no_near_end_snap"
+
+
+# --- e_reason subdivision of the RODE (E) tail ----------------------------------------------------
+# NOTE: the sim does not model FOK-kill, so every e_reason is STRUCTURAL (the near-end price
+# CONDITION was never met), not "an order was tried and killed".
+
+def test_e_reason_none_and_freeze_mids_none_when_window_never_closes():
+    rec, _ = _cg.top_book_window_gated(SNAPS, TAPE, "Up", SLUG, freeze_sec=30.0)
+    assert rec["exit_branch"] == "clean"
+    assert rec["e_reason"] is None                 # only rode_* windows carry a reason
+    assert rec["mid_up_at_freeze"] is None         # never went closing -> no freeze snapshot
+    assert rec["mid_dn_at_freeze"] is None
+    assert rec["sell_px"] is None and rec["sell_side"] is None
+
+
+def test_e_reason_no_bid_on_loser_and_freeze_mids_captured():
+    # rel 200: only the Up SELL prints -> naked Up 5. rel 280 (inside near-end at freeze 60): the
+    # Down book has NO ask (completion impossible) and the heavy Up book has NO bid -> nothing to
+    # sell into -> structurally unfixable.
+    snaps = [_snap(OPEN + 200, 0.50, 0.55, 0.45, 0.50),
+             {"ts": OPEN + 280,
+              "yes": {"bids": [], "asks": [["0.55", "500"]]},
+              "no": {"bids": [["0.45", "500"]], "asks": []}}]
+    tape = [{"oi": 0, "side": "SELL", "price": 0.50, "size": 5.0, "ts": OPEN + 200}]
+    rec, _ = _cg.top_book_window_gated(snaps, tape, "Up", SLUG, freeze_sec=60.0)
+    assert rec["exit_branch"] == "rode_won"
+    assert rec["e_reason"] == "no_bid_on_loser"
+    assert rec["sell_px"] is None                  # no bid -> no sell happened
+    # freeze fires at the rel-280 snap (first tick with <=60s left); mids are captured THERE.
+    # _mid falls back to the single present side when the book is one-sided (ask-only Up -> 0.55).
+    assert abs(rec["mid_up_at_freeze"] - 0.55) < 1e-9
+    assert abs(rec["mid_dn_at_freeze"] - 0.45) < 1e-9
+
+
+def test_e_reason_budget_when_completion_priced_ok_but_blocked():
+    # budget = pwc + complete_budget = 3.0. Up fills 5 @ 0.501 = 2.505 (fits). At rel 280 the Down ask
+    # 0.40 makes the pair 0.901 < $1 so completion is PRICED fine, but 2.505 + 5*0.40 > 3.0 -> blocked.
+    snaps = [_snap(OPEN + 200, 0.50, 0.55, 0.39, 0.50),
+             _snap(OPEN + 280, 0.50, 0.55, 0.39, 0.40)]
+    tape = [{"oi": 0, "side": "SELL", "price": 0.50, "size": 5.0, "ts": OPEN + 200}]
+    rec, _ = _cg.top_book_window_gated(snaps, tape, "Up", SLUG, freeze_sec=60.0,
+                                       pwc=3.0, complete_budget=0.0)
+    assert rec["exit_branch"] == "rode_won"
+    assert rec["completes"] == 0
+    assert rec["e_reason"] == "budget"
+
+
+def test_sell_px_and_side_recorded_on_the_sell_branch():
+    # rel 200: naked Up 5 @ 0.501. rel 280: the Down ask is 0.99 -> completion condition fails, so the
+    # sell branch runs and dumps the heavy Up leg into its 0.62 bid.
+    snaps = [_snap(OPEN + 200, 0.50, 0.55, 0.45, 0.50),
+             _snap(OPEN + 280, 0.62, 0.66, 0.34, 0.99)]
+    tape = [{"oi": 0, "side": "SELL", "price": 0.50, "size": 5.0, "ts": OPEN + 200}]
+    rec, _ = _cg.top_book_window_gated(snaps, tape, "Up", SLUG, freeze_sec=60.0)
+    assert rec["exit_branch"] == "sold"
+    assert rec["sells"] == 1
+    assert rec["sell_side"] == "Up"
+    assert abs(rec["sell_px"] - 0.62) < 1e-9       # the realized heavy best bid
+    assert abs(rec["mid_up_at_freeze"] - 0.64) < 1e-9   # (0.62+0.66)/2 at the freeze tick
+    assert rec["e_reason"] is None                 # not a rode window
 
 
 def test_early_close_accumulates_no_more():
