@@ -16,7 +16,10 @@ NAKED_LIMIT=${NAKED_LIMIT:-8}                 # naked tripwire: cap(6)+2 default
 #                                               DIRECTION-NEUTRAL mode (cap 12) or it false-fires
 BASE_F=/home/ubuntu/live_watch_base.txt
 LOG=/home/ubuntu/poly-quoter/logs/control.log
-MF_BASE=$(grep -c merge_failed "$LOG" 2>/dev/null || echo 0)   # merges failed BEFORE we started
+# NOTE: `grep -c` ALWAYS prints the count and exits 1 when it is 0, so `grep -c ... || echo 0`
+# prints TWO lines ("0\n0") and every later $((...)) on it dies with "arithmetic syntax error".
+# Take the count as-is and default only when the file/grep produced nothing at all.
+MF_BASE=$(grep -c merge_failed "$LOG" 2>/dev/null); MF_BASE=${MF_BASE:-0}   # merges failed BEFORE we started
 DD_COUNT=0
 while true; do
   EQ=$(/home/ubuntu/poly-quoter/.venv/bin/python - << 'PYEOF'
@@ -59,7 +62,7 @@ PYEOF
   S=$(curl -s -m4 http://127.0.0.1:8080/api/status)
   MODE=$(echo "$S" | python3 -c "import sys,json;print(json.load(sys.stdin).get('mode'))" 2>/dev/null)
   NAKED=$(echo "$S" | python3 -c "import sys,json;print(int(json.load(sys.stdin).get('naked_shares') or 0))" 2>/dev/null)
-  MF_NOW=$(grep -c merge_failed "$LOG" 2>/dev/null || echo 0)
+  MF_NOW=$(grep -c merge_failed "$LOG" 2>/dev/null); MF_NOW=${MF_NOW:-0}
   MF=$((MF_NOW - MF_BASE))                      # merges failed SINCE we started
   # equity-dd debounce: count consecutive breaches, reset on any healthy read
   if python3 -c "exit(0 if float('$DD') < $LIMIT else 1)"; then
