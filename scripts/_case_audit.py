@@ -222,7 +222,11 @@ def build_report(rows):
     bins = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 1e9)]
     for lo, hi in bins:
         cnt = sum(1 for x in naf if lo <= x < hi)
-        lab = ">=6 (VIOLATION)" if lo == 6 else "[%d,%d)" % (lo, hi)
+        # NOTE: naked == cap (6.00) is LEGAL — production skew_ok is boundary-inclusive
+        # (inv+size-inv_other <= cap), so the cap is reachable exactly. Only naked > 6 is a
+        # violation (flagged separately below); labelling the [6,inf) bucket "VIOLATION" was a
+        # false alarm on the boundary.
+        lab = "6.0 (== cap, ok)" if lo == 6 else "[%d,%d)" % (lo, hi)
         p("    %-16s %4d  %5.1f%%" % (lab, cnt, 100.0 * cnt / len(naf) if naf else 0.0))
     max_naf = max(naf) if naf else 0.0
     over6 = [r for r in traded if r["naked_at_freeze"] is not None and r["naked_at_freeze"] > 6]

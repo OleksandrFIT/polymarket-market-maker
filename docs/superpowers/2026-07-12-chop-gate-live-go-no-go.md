@@ -132,6 +132,27 @@ regime — the structural risk; cap 6 keeps it small. This is a PnL statement; i
 the clock-only choice). Per-day distribution has near-zero / negative days (normal, pre-known). The earlier +$0.55
 figure came from the looser sim (which also overstated the tail as −$7); +$0.50 with a −$3.5 tail is the honest one.
 
+## POST-FIX re-audit (2026-07-14) — invariant cleared, numbers improved
+
+The case-audit found a linked-pair leak (25/2504 windows merged a pair >= $1, max 1.0347). Fixed in
+`d32b7ee` (two-sided cap + joint-sum guard + completion margin) and re-audited on the same 13 tapes:
+
+| | pre-fix | **post-fix** |
+|---|---|---|
+| merged pairs >= $1 (pre-registered STOP) | 25 windows | **0 — "linked-pair cap holds"** |
+| reconciliation | to the cent | **to the cent** (Σ +1445.66 = aggregate, diff 0.0000) |
+| naked@freeze max | 6.00 | **6.00** (== cap, legal: skew_ok is boundary-inclusive) |
+| **PnL/window** | +$0.493 | **+$0.568 (+15%)** |
+| **chop pair_eff** | 0.9150 | **0.9146** (unchanged) |
+| σ per-window pair_eff | 0.0952 | 0.0951 (n ≥ 80 windows stands) |
+
+**The fix made the bot better, not worse** — the prediction "pair_eff improves, PnL drops" was wrong in
+both directions. The two-sided cap removes a broad class of adverse fills ("buy the heavier leg dear"),
+not just the 1% that breached $1: the leak was costing ~15% of PnL. Case structure unchanged (C=65%).
+**The GO margin is unaffected: chop 0.9146 → 0.96 = ~4.5¢.** The pre-registered invariant is now
+satisfied — it no longer blocks live. (Window count 2532 → 2545 because the 07-13 tape kept growing;
+0.5%, immaterial.)
+
 ## Trend-detection ceiling — the detector branch is permanently closed
 
 Two independent measures bound what ANY trend-revocation could ever add, and both say "negligible":
