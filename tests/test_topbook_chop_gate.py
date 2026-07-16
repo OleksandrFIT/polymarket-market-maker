@@ -67,6 +67,7 @@ def _make_runner(ctl, chop_gate=True, fok_fills=True, per_window_cap=15.0,
         tb_size=5.0, tb_naked_cap=6.0, tb_tick=0.001, tb_merge_min=5.0,
         per_window_cap=per_window_cap, tb_complete=tb_complete, tb_complete_gate_sec=45.0,
         complete_budget=complete_budget, inv_reconcile_grace_sec=12.0, dry_run=False,
+        tb_sell_naked=True, tb_link_margin=0.01,   # production values (sell-loser branch reachable)
         chop_gate=chop_gate, chop_trend_revoke=chop_trend_revoke,
         chop_detect_sec=chop_detect_sec, chop_dev_thresh=0.28,
         chop_lookback_sec=60.0, chop_confirm_sec=chop_confirm_sec,
@@ -338,6 +339,38 @@ def test_no_assumed_fill_when_lookup_succeeds(monkeypatch):
          t_start=150.0, step=15.0)
     fq = _fillquality(events)
     assert fq is not None and fq["assumed_shares"] == 0 and fq["assumed_notional"] == 0
+
+
+def test_sell_recovery_recorded(monkeypatch):
+    # Up maker fills -> naked Up 5 (heavy, avg 0.501). Down ask 0.60 -> 0.501+0.60 = 1.101 >= 1-margin
+    # -> completion BLOCKED -> sell-loser fires (FOK-sell Up into its 0.50 bid). The 2nd execution
+    # quantity must be recorded: realized sell price, shares, attempts, and the freeze reference mid.
+    ctl = _Ctl()
+    runner = _make_runner(ctl, chop_trend_revoke=False)
+    events = _capture(monkeypatch)
+    _run(ctl, runner, 3, monkeypatch, up=(0.50, 0.99), dn=(0.01, 0.60),
+         t_start=60.0, step=20.0)
+    fq = _fillquality(events)
+    assert fq is not None
+    assert fq["mid_at_freeze"] is not None, "freeze reference mid must be captured for sell_recovery"
+    assert fq["sell_attempts"] >= 1
+    assert fq["sell_shares"] > 0 and fq["sell_px_avg"] is not None
+    assert fq["sell_kills"] == 0
+    assert fq["sell_side"] == "Up"
+
+
+def test_sell_fok_kill_recorded(monkeypatch):
+    # same setup but every FOK is killed (thin book) -> the leg rides (case E). The kill MUST be
+    # counted: sell_kills is the live driver of the E tail, which the shadow sim cannot model.
+    ctl = _Ctl()
+    runner = _make_runner(ctl, chop_trend_revoke=False, fok_fills=False)
+    events = _capture(monkeypatch)
+    _run(ctl, runner, 3, monkeypatch, up=(0.50, 0.99), dn=(0.01, 0.60),
+         t_start=60.0, step=20.0)
+    fq = _fillquality(events)
+    assert fq is not None
+    assert fq["sell_attempts"] >= 1 and fq["sell_kills"] >= 1
+    assert fq["sell_px_avg"] is None and fq["sell_shares"] == 0
 
 
 def test_observe_only_clock_still_closes(monkeypatch):

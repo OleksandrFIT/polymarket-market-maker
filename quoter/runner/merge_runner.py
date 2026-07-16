@@ -883,6 +883,19 @@ class MergeRunner:
         shift_replaces = 0                 # count of pull-up (shift-driven) cancel/reposts
         assumed_shares = 0.0               # shares credited via the assume-full fallback (lookup failed)
         assumed_notional = 0.0             # their cost basis — lets pair_eff be recomputed w/ & w/o them
+        # SECOND EXECUTION QUANTITY (never measured, not even in shadow): 75% of windows end in a
+        # TAKER close — FOK-buy the light leg (case B) or FOK-sell the heavy loser (case C, ~64%) —
+        # and the 17% that ride (case E) are closes that DIDN'T EXECUTE (FOK killed / no bid). So the
+        # economics rest on sell RECOVERY (realized price vs the leg's value at freeze) and on the
+        # FOK-kill rate. The sim cannot model either (it fills whenever the price condition holds).
+        mid_at_freeze = None               # Up-mid at freeze — the reference for sell_recovery
+        sell_notional = 0.0                # realized $ taken by sell-loser FOKs
+        sell_shares = 0.0
+        sell_side = None                   # which leg we sold (heavy/loser)
+        sell_attempts = 0                  # FOK-sell tries; kills = the E-tail driver, LIVE-only
+        sell_kills = 0
+        complete_attempts = 0              # FOK-buy (completion) tries
+        complete_kills = 0
         tok = {"Up": m.yes_token, "Down": m.no_token}
         cadence = self.cfg.requote_sec   # re-quote cadence (env REQUOTE_SEC; 2s default, 1s A/B)
         try:
@@ -935,6 +948,7 @@ class MergeRunner:
                                 closing = True
                                 closing_reason = "trend" if act_trend else "clock"
                                 revoked_at = round(elapsed, 0)
+                                mid_at_freeze = last_mid   # reference for sell_recovery (Up-mid)
                                 # cancel ONLY the resting accumulation bids (completion is FOK,
                                 # never resting) so completion/merge below keep working.
                                 for s in ("Up", "Down"):
@@ -1104,6 +1118,7 @@ class MergeRunner:
                                 can_complete = (qty >= 1 and light_ask and heavy_avg is not None
                                                 and (heavy_avg + light_ask) < 1.0 - self.cfg.tb_link_margin)
                                 if can_complete:
+                                    complete_attempts += 1
                                     r = await self._place_limit(
                                         token_id=tok[light], price=light_ask, size=qty,
                                         side="BUY", post_only=False, order_type="FOK")
@@ -1121,6 +1136,8 @@ class MergeRunner:
                                         log.info("topbook_complete", side=light, qty=filled,
                                                  price=round(light_ask, 3))
                                         completes += 1
+                                    else:
+                                        complete_kills += 1     # FOK killed / unconfirmed
                                 elif near_end and self.cfg.tb_sell_naked and heavy_bid and heavy_bid > 0:
                                     # pair >= $1 (market moved against us / trend): completing
                                     # would BUY the winner at a premium and lock a bigger loss.
@@ -1128,6 +1145,7 @@ class MergeRunner:
                                     # value, and since the Polymarket price LAGS BTC the bid is
                                     # richer than fair, so this beats riding to resolution.
                                     sq = float(int(abs(naked)))
+                                    sell_attempts += 1
                                     r = await self._place_limit(
                                         token_id=tok[heavy], price=heavy_bid, size=sq,
                                         side="SELL", post_only=False, order_type="FOK")
@@ -1142,9 +1160,14 @@ class MergeRunner:
                                         if inv[heavy] <= 0:      # clear float residual once flat
                                             inv[heavy] = 0.0
                                             held_cost[heavy] = 0.0
+                                        sell_notional += sold * heavy_bid   # realized recovery
+                                        sell_shares += sold
+                                        sell_side = heavy
                                         log.info("topbook_sell_naked", side=heavy, qty=sold,
                                                  price=round(heavy_bid, 3))
                                         sells += 1
+                                    else:
+                                        sell_kills += 1        # FOK killed on a thin bid -> rides (case E)
                         # merge matched pairs (committed `cost` NOT reduced; held_cost IS, to
                         # keep per-share avg correct). Near-end merge ANY complete pair (min 1)
                         # so a just-completed sub-tb_merge_min pair doesn't ride unmerged.
@@ -1211,7 +1234,15 @@ class MergeRunner:
                  cap_replaces=cap_replaces,
                  shift_replaces=shift_replaces,
                  assumed_shares=round(assumed_shares, 1),      # >0 -> some fills were lookup-fallback
-                 assumed_notional=round(assumed_notional, 4))  # -> recompute pair_eff w/ & w/o these
+                 assumed_notional=round(assumed_notional, 4),  # -> recompute pair_eff w/ & w/o these
+                 # sell RECOVERY + FOK-kill rate: the 2nd execution quantity (75% of windows close
+                 # via taker; recovery = sell_px_avg vs mid_at_freeze, kills drive the case-E tail).
+                 mid_at_freeze=round(mid_at_freeze, 4) if mid_at_freeze is not None else None,
+                 sell_side=sell_side,
+                 sell_px_avg=(round(sell_notional / sell_shares, 4) if sell_shares > 0 else None),
+                 sell_shares=round(sell_shares, 1),
+                 sell_attempts=sell_attempts, sell_kills=sell_kills,
+                 complete_attempts=complete_attempts, complete_kills=complete_kills)
         committed = cost["Up"] + cost["Down"] + sum(p * sz for (p, sz) in resting.values())
         log.info("topbook_done", slug=m.slug, merged=merged,
                  inv_up=inv["Up"], inv_dn=inv["Down"],
