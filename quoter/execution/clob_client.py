@@ -97,7 +97,14 @@ class ClobOps:
                 "status": resp.get("status", "live"),
             }
         except Exception as e:
-            log.warning("place_exception", error=str(e), token=token_id[:14])
+            # Log the FULL order params, not just the error. Live run #1 (2026-07-16) hit
+            # 'invalid maker amount' x26 on the sell-loser path and the root cause was NOT
+            # diagnosable afterwards, because this branch recorded only error+token — no price,
+            # size, side or order_type. The sibling `place_failed` already logs price/size; this
+            # path must too, or a rejected order is an unexplainable event.
+            log.warning("place_exception", error=str(e), token=token_id[:14],
+                        price=price, size=size, side=side,
+                        order_type=order_type, post_only=post_only)
             return None
 
     async def cancel_order(self, order_id: str) -> bool:
