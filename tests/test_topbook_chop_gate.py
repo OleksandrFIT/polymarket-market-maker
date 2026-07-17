@@ -359,6 +359,26 @@ def test_sell_recovery_recorded(monkeypatch):
     assert fq["sell_side"] == "Up"
 
 
+def test_sell_skipped_on_sub_tick_bid(monkeypatch):
+    # THE live-run-1 bug: the loser crashes sub-tick (bid 0.009 < 0.01) near resolution, so a raw
+    # `price=heavy_bid` SELL is rejected 'invalid maker amount'. The fix floors the bid to the tick;
+    # below one tick there is no valid order -> SKIP (log topbook_sell_skip), not a kill, not an API
+    # call. Down heavy loser with a 0.005 bid, Up ask 0.99 -> completion blocked, sell path reached.
+    ctl = _Ctl()
+    runner = _make_runner(ctl, chop_trend_revoke=False)
+    events = _capture(monkeypatch)
+    # Up maker fills (naked Up 5 = the HEAVY leg we sell); its bid has crashed sub-tick to 0.005.
+    # Down ask 0.99 -> completion blocked -> the sell path is reached, and floor(0.005)=0 -> SKIP.
+    _run(ctl, runner, 3, monkeypatch, up=(0.005, 0.99), dn=(0.02, 0.99),
+         t_start=60.0, step=20.0)
+    fq = _fillquality(events)
+    assert fq is not None
+    assert fq["sell_skips"] >= 1, "sub-tick bid must be SKIPPED, not attempted"
+    assert fq["sell_attempts"] == 0 and fq["sell_kills"] == 0, "skip is neither an attempt nor a kill"
+    assert any(ev == "topbook_sell_skip" and kw.get("reason") == "sub_tick_bid"
+               for ev, kw in events)
+
+
 def test_sell_fok_kill_recorded(monkeypatch):
     # same setup but every FOK is killed (thin book) -> the leg rides (case E). The kill MUST be
     # counted: sell_kills is the live driver of the E tail, which the shadow sim cannot model.

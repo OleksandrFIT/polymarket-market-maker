@@ -39,7 +39,8 @@ from quoter.runner.regime_tracker import RegimeTracker
 from quoter.runner.five_min_planner import plan_five_min
 from quoter.runner.top_book_planner import (
     plan_top_book, diff_quotes, plan_merge, committed_gate, skew_ok, link_pair_bids, taker_fee,
-    maker_rebate, chop_revoke, window_regime, plan_requote as tb_plan_requote)
+    maker_rebate, chop_revoke, window_regime, floor_to_tick, ceil_to_tick,
+    plan_requote as tb_plan_requote)
 from quoter.research.chase import chase_signal
 from quoter.runner.regime_gate import regime_tradeable
 from quoter.runner.paper_fill import PaperBook
@@ -894,6 +895,7 @@ class MergeRunner:
         sell_side = None                   # which leg we sold (heavy/loser)
         sell_attempts = 0                  # FOK-sell tries; kills = the E-tail driver, LIVE-only
         sell_kills = 0
+        sell_skips = 0                     # sub-tick bid -> no valid order placed (not a kill)
         complete_attempts = 0              # FOK-buy (completion) tries
         complete_kills = 0
         tok = {"Up": m.yes_token, "Down": m.no_token}
@@ -1110,17 +1112,24 @@ class MergeRunner:
                                 resting_notional = sum(p * sz for (p, sz) in resting.values())
                                 budget_left = ((self.cfg.per_window_cap + self.cfg.complete_budget)
                                                - (cost["Up"] + cost["Down"]) - resting_notional)
-                                if light_ask and light_ask > 0:
-                                    qty = min(qty, budget_left / light_ask)
+                                # TICK: a taker BUY must reach the ask -> round the ask UP to the
+                                # 0.01 market tick. Live run #1 (2026-07-16) proved the exchange
+                                # rejects sub-tick prices ('invalid maker amount'); the book/_best can
+                                # return sub-tick values near resolution. buy_px >= light_ask so it
+                                # still crosses; the higher (conservative) price also tightens the <$1 gate.
+                                buy_px = ceil_to_tick(light_ask) if light_ask else 0.0
+                                if buy_px and buy_px > 0:
+                                    qty = min(qty, budget_left / buy_px)
                                 qty = float(int(qty))
                                 # margin (link_margin) so a completed pair also stays < $1 with the
                                 # same buffer the accumulation cap uses (case-audit invariant fix).
-                                can_complete = (qty >= 1 and light_ask and heavy_avg is not None
-                                                and (heavy_avg + light_ask) < 1.0 - self.cfg.tb_link_margin)
+                                can_complete = (qty >= 1 and buy_px and 0 < buy_px < 0.99
+                                                and heavy_avg is not None
+                                                and (heavy_avg + buy_px) < 1.0 - self.cfg.tb_link_margin)
                                 if can_complete:
                                     complete_attempts += 1
                                     r = await self._place_limit(
-                                        token_id=tok[light], price=light_ask, size=qty,
+                                        token_id=tok[light], price=buy_px, size=qty,
                                         side="BUY", post_only=False, order_type="FOK")
                                     # FOK is all-or-nothing: credit ONLY the real matched size.
                                     # A killed FOK still returns success+order_id, so crediting
@@ -1131,43 +1140,59 @@ class MergeRunner:
                                               if (r and r.get("order_id")) else None)
                                     if filled:
                                         inv[light] += filled
-                                        cost[light] += filled * light_ask
-                                        held_cost[light] += filled * light_ask
+                                        cost[light] += filled * buy_px
+                                        held_cost[light] += filled * buy_px
                                         log.info("topbook_complete", side=light, qty=filled,
-                                                 price=round(light_ask, 3))
+                                                 price=buy_px)
                                         completes += 1
                                     else:
                                         complete_kills += 1     # FOK killed / unconfirmed
                                 elif near_end and self.cfg.tb_sell_naked and heavy_bid and heavy_bid > 0:
                                     # pair >= $1 (market moved against us / trend): completing
                                     # would BUY the winner at a premium and lock a bigger loss.
-                                    # Instead SELL the heavy loser into its bid — recovers its
-                                    # value, and since the Polymarket price LAGS BTC the bid is
-                                    # richer than fair, so this beats riding to resolution.
+                                    # Instead SELL the heavy loser into its bid.
+                                    # TICK: a SELL limit must be tick-valid -> floor the bid to the
+                                    # 0.01 market tick. THE live run #1 bug: near resolution the loser
+                                    # crashes sub-tick (mean loser bid at freeze = 0.009, below tick),
+                                    # so `price=heavy_bid` raw was rejected 'invalid maker amount' x26.
+                                    # If the bid floors below one tick there is NO valid bid to sell
+                                    # into (the leg is worth ~0) -> SKIP and log, instead of hammering
+                                    # the API with invalid orders every tick. The loss was already
+                                    # taken upstream (accumulated a losing leg); matches the offline
+                                    # E-audit's 93% 'no_bid_on_loser, structurally unfixable'.
+                                    sell_px = floor_to_tick(heavy_bid)
                                     sq = float(int(abs(naked)))
-                                    sell_attempts += 1
-                                    r = await self._place_limit(
-                                        token_id=tok[heavy], price=heavy_bid, size=sq,
-                                        side="SELL", post_only=False, order_type="FOK")
-                                    # credit ONLY the real sold size (killed FOK -> 0, no phantom
-                                    # under-hold; None -> 0: keep the leg and retry next tick).
-                                    sold = (self._order_matched(r["order_id"])
-                                            if (r and r.get("order_id")) else None)
-                                    if sold:
-                                        avg_h = held_cost[heavy] / inv[heavy] if inv[heavy] > 0 else 0.0
-                                        held_cost[heavy] = max(0.0, held_cost[heavy] - sold * avg_h)
-                                        inv[heavy] -= sold
-                                        if inv[heavy] <= 0:      # clear float residual once flat
-                                            inv[heavy] = 0.0
-                                            held_cost[heavy] = 0.0
-                                        sell_notional += sold * heavy_bid   # realized recovery
-                                        sell_shares += sold
-                                        sell_side = heavy
-                                        log.info("topbook_sell_naked", side=heavy, qty=sold,
-                                                 price=round(heavy_bid, 3))
-                                        sells += 1
+                                    if sell_px < 0.01:
+                                        # no tick-valid bid: the leg is worth ~0, nothing to sell into.
+                                        # SKIP (not a kill) and log — do NOT hammer the API with an
+                                        # invalid sub-tick order every tick.
+                                        sell_skips += 1
+                                        log.info("topbook_sell_skip", side=heavy, qty=sq,
+                                                 bid=round(heavy_bid, 4), reason="sub_tick_bid")
                                     else:
-                                        sell_kills += 1        # FOK killed on a thin bid -> rides (case E)
+                                        sell_attempts += 1
+                                        r = await self._place_limit(
+                                            token_id=tok[heavy], price=sell_px, size=sq,
+                                            side="SELL", post_only=False, order_type="FOK")
+                                        # credit ONLY the real sold size (killed FOK -> 0, no phantom
+                                        # under-hold; None -> 0: keep the leg and retry next tick).
+                                        sold = (self._order_matched(r["order_id"])
+                                                if (r and r.get("order_id")) else None)
+                                        if sold:
+                                            avg_h = held_cost[heavy] / inv[heavy] if inv[heavy] > 0 else 0.0
+                                            held_cost[heavy] = max(0.0, held_cost[heavy] - sold * avg_h)
+                                            inv[heavy] -= sold
+                                            if inv[heavy] <= 0:      # clear float residual once flat
+                                                inv[heavy] = 0.0
+                                                held_cost[heavy] = 0.0
+                                            sell_notional += sold * heavy_bid   # realized (fills at the bid)
+                                            sell_shares += sold
+                                            sell_side = heavy
+                                            log.info("topbook_sell_naked", side=heavy, qty=sold,
+                                                     price=round(heavy_bid, 3), limit=sell_px)
+                                            sells += 1
+                                        else:
+                                            sell_kills += 1    # FOK killed on a thin bid -> rides (case E)
                         # merge matched pairs (committed `cost` NOT reduced; held_cost IS, to
                         # keep per-share avg correct). Near-end merge ANY complete pair (min 1)
                         # so a just-completed sub-tb_merge_min pair doesn't ride unmerged.
@@ -1241,7 +1266,7 @@ class MergeRunner:
                  sell_side=sell_side,
                  sell_px_avg=(round(sell_notional / sell_shares, 4) if sell_shares > 0 else None),
                  sell_shares=round(sell_shares, 1),
-                 sell_attempts=sell_attempts, sell_kills=sell_kills,
+                 sell_attempts=sell_attempts, sell_kills=sell_kills, sell_skips=sell_skips,
                  complete_attempts=complete_attempts, complete_kills=complete_kills)
         committed = cost["Up"] + cost["Down"] + sum(p * sz for (p, sz) in resting.values())
         log.info("topbook_done", slug=m.slug, merged=merged,

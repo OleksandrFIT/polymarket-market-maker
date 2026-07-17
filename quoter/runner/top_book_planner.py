@@ -160,6 +160,19 @@ def plan_requote(resting: dict, target: list[TBQuote], last_replace: dict, now: 
     return cancel, post, cap_sides
 
 
+def floor_to_tick(price: float, tick: float = 0.01) -> float:
+    """Largest tick multiple <= price. Use for a SELL limit: staying at/under the bid still crosses
+    (a taker fills at the resting bid's better price). Returns a clean 2-dp float."""
+    import math
+    return round(math.floor(round(price / tick, 6)) * tick, 2)
+
+
+def ceil_to_tick(price: float, tick: float = 0.01) -> float:
+    """Smallest tick multiple >= price. Use for a taker BUY limit (completion): must reach the ask."""
+    import math
+    return round(math.ceil(round(price / tick, 6)) * tick, 2)
+
+
 def plan_merge(inv_up: float, inv_dn: float, merge_min: float) -> float:
     m = min(inv_up, inv_dn)
     return m if m >= merge_min else 0.0

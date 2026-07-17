@@ -165,3 +165,24 @@ def test_plan_merge():
     assert plan_merge(12.0, 7.0, merge_min=5.0) == 7.0
     assert plan_merge(3.0, 7.0, merge_min=5.0) == 0.0     # min(3,7)=3 < 5
     assert plan_merge(0.0, 7.0, merge_min=5.0) == 0.0
+
+
+def test_floor_to_tick_sell_price():
+    # SELL limit must be tick-valid (0.01). A sub-tick loser bid (0.009) floors to 0 -> no valid
+    # sell -> the live-run-1 'invalid maker amount' case. 0.015 -> 0.01 (still crosses the bid).
+    from quoter.runner.top_book_planner import floor_to_tick
+    assert floor_to_tick(0.009) == 0.0
+    assert floor_to_tick(0.005) == 0.0
+    assert floor_to_tick(0.01) == 0.01
+    assert floor_to_tick(0.015) == 0.01
+    assert floor_to_tick(0.099) == 0.09
+    assert floor_to_tick(0.02) == 0.02        # exact tick unchanged (no float drift)
+
+
+def test_ceil_to_tick_buy_price():
+    # taker BUY (completion) must reach the ask -> round UP to tick.
+    from quoter.runner.top_book_planner import ceil_to_tick
+    assert ceil_to_tick(0.009) == 0.01
+    assert ceil_to_tick(0.011) == 0.02
+    assert ceil_to_tick(0.44) == 0.44         # exact tick unchanged
+    assert ceil_to_tick(0.445) == 0.45
