@@ -21,3 +21,6 @@ quoter/backtest/data/
 data/
 _analyze_flips.py
 node-live-test/
+.env*
+state.db*
+.claude/
